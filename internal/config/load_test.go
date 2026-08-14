@@ -220,6 +220,8 @@ func TestLoad_Errors(t *testing.T) {
 		{name: "duration に単位なし", yaml: "version: 1\nredash: {timeout: 300}\n", wantMsg: "duration として読めません"},
 		{name: "duration が不正", yaml: "version: 1\nredash: {timeout: しばらく}\n", wantMsg: "duration として読めません"},
 		{name: "duration が負", yaml: "version: 1\nredash: {poll_interval: -1s}\n", wantMsg: "負の値"},
+		// 0s は未指定と同じ扱いになり、書いた値が黙って差し替わる。
+		{name: "duration が 0", yaml: "version: 1\nredash: {timeout: 0s}\n", wantMsg: "0 は指定できません"},
 
 		// enum
 		{name: "method が不正", yaml: "version: 1\nmasking:\n  rules:\n    - patterns: [a]\n      method: redct\n", wantMsg: `不正な値 "redct"`},
@@ -339,7 +341,6 @@ func TestLoad_Duration(t *testing.T) {
 		{name: "1秒", yaml: "1s", want: time.Second},
 		{name: "分と秒", yaml: "1m30s", want: 90 * time.Second},
 		{name: "ミリ秒", yaml: "500ms", want: 500 * time.Millisecond},
-		{name: "ゼロ", yaml: "0s", want: 0},
 	}
 
 	for _, tt := range tests {

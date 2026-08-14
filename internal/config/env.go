@@ -115,6 +115,10 @@ func parseEnvDuration(v string) (Duration, error) {
 	if d < 0 {
 		return 0, fmt.Errorf("負の値は指定できません %q", v)
 	}
+	// 0 は未指定と同じ扱いになり、下のレイヤの値がそのまま残る。
+	if d == 0 {
+		return 0, fmt.Errorf("0 は指定できません %q。未指定と区別できないため、変数ごと外してください", v)
+	}
 	return Duration(d), nil
 }
 
