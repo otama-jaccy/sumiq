@@ -39,19 +39,36 @@ func TestEffectiveAutoLimit(t *testing.T) {
 
 func TestValidateQuery(t *testing.T) {
 	tests := []struct {
-		name      string
-		autoLimit bool
-		maxRows   int
-		wantErr   bool
+		name    string
+		global  *bool
+		ds      *bool
+		maxRows int
+		wantErr bool
 	}{
-		{name: "既定の組み合わせは境界として許容", autoLimit: true, maxRows: 1000, wantErr: false},
-		{name: "auto_limit true で 1000 未満は許容", autoLimit: true, maxRows: 1, wantErr: false},
-		{name: "auto_limit true で 1000 超過は設定エラー", autoLimit: true, maxRows: 1001, wantErr: true},
-		{name: "auto_limit false なら max_rows がいくつでも許容", autoLimit: false, maxRows: 1_000_000, wantErr: false},
+		{name: "既定の組み合わせは境界として許容", global: boolPtr(true), maxRows: 1000, wantErr: false},
+		{name: "auto_limit true で 1000 未満は許容", global: boolPtr(true), maxRows: 1, wantErr: false},
+		{name: "auto_limit true で 1000 超過は設定エラー", global: boolPtr(true), maxRows: 1001, wantErr: true},
+		{name: "auto_limit false なら max_rows がいくつでも許容", global: boolPtr(false), maxRows: 1_000_000, wantErr: false},
+		{
+			name:    "データソース単位で false に上書きしていれば許容",
+			global:  boolPtr(true),
+			ds:      boolPtr(false),
+			maxRows: 1_000_000,
+			wantErr: false,
+		},
+		{
+			name:    "データソース単位で true に上書きしていれば検証が効く",
+			global:  boolPtr(false),
+			ds:      boolPtr(true),
+			maxRows: 1001,
+			wantErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateQuery(tt.autoLimit, tt.maxRows)
+			q := config.Query{AutoLimit: tt.global, MaxRows: tt.maxRows}
+			ds := config.DataSource{AutoLimit: tt.ds}
+			err := ValidateQuery(q, ds)
 			if tt.wantErr && err == nil {
 				t.Fatal("ValidateQuery() エラーを期待しましたが nil でした")
 			}
@@ -67,129 +84,125 @@ func TestValidateQuery(t *testing.T) {
 // 確かめたテストを置く」）。しきい値を実装と揃えて書くのではなく、
 // ADR-0003 §10 が定める具体的な境界（1000）を直書きして固定する。
 func TestValidateQueryCatchesRegression(t *testing.T) {
-	if err := ValidateQuery(true, 1000); err != nil {
+	q := config.Query{AutoLimit: boolPtr(true)}
+	ds := config.DataSource{}
+
+	q.MaxRows = 1000
+	if err := ValidateQuery(q, ds); err != nil {
 		t.Fatalf("境界値 1000 は許容されるべきですが失敗しました: %v", err)
 	}
-	if err := ValidateQuery(true, 1001); err == nil {
+
+	q.MaxRows = 1001
+	if err := ValidateQuery(q, ds); err == nil {
 		t.Fatal("auto_limit: true かつ max_rows: 1001 は Redash が 1000 で切るため到達不能であり、" +
 			"設定エラーになるべきです")
 	}
 }
 
-func rows(n int) []redash.Row {
-	out := make([]redash.Row, n)
-	for i := range out {
-		out[i] = redash.Row{i}
-	}
-	return out
-}
-
 func testResult(n int) *redash.Result {
+	rows := make([]redash.Row, n)
+	for i := range rows {
+		rows[i] = redash.Row{i}
+	}
 	return &redash.Result{
 		Columns: []redash.Column{{Name: "id", Type: "integer"}},
-		Rows:    rows(n),
+		Rows:    rows,
 	}
 }
 
-func TestCheck_WithinLimit(t *testing.T) {
-	var errW bytes.Buffer
-	res := testResult(3)
-	q := config.Query{MaxRows: 3, OnExceed: config.OnExceedError}
+func TestCheck(t *testing.T) {
+	tests := []struct {
+		name        string
+		rows        int
+		nilResult   bool
+		maxRows     int
+		onExceed    config.OnExceed
+		wantRows    int // 成功時に期待する行数
+		wantErr     bool
+		wantExceed  bool // ExceededError を期待する
+		wantWarning bool // errW に切り詰めの警告を期待する
+	}{
+		{name: "上限以下はそのまま通す", rows: 3, maxRows: 3, onExceed: config.OnExceedError, wantRows: 3},
+		{
+			name:       "on_exceed: error は超過分を一切返さない",
+			rows:       5,
+			maxRows:    3,
+			onExceed:   config.OnExceedError,
+			wantErr:    true,
+			wantExceed: true,
+		},
+		{
+			// on_exceed 未指定（空文字列）でも error と同じ fail-closed になることを見る。
+			// defaults() が埋めるはずの値だが、解決前の値を渡された場合の保険。
+			name:       "on_exceed 未指定は error 扱い",
+			rows:       5,
+			maxRows:    3,
+			wantErr:    true,
+			wantExceed: true,
+		},
+		{
+			name:        "on_exceed: truncate は max_rows 件に切り詰めて警告する",
+			rows:        5,
+			maxRows:     3,
+			onExceed:    config.OnExceedTruncate,
+			wantRows:    3,
+			wantWarning: true,
+		},
+		{name: "結果が nil はエラー", nilResult: true, maxRows: 10, wantErr: true},
+		{name: "max_rows 未指定はエラー", rows: 1, maxRows: 0, wantErr: true},
+		{name: "扱えない on_exceed はエラー", rows: 2, maxRows: 1, onExceed: config.OnExceed("bogus"), wantErr: true},
+	}
 
-	got, err := Check(&errW, res, q)
-	if err != nil {
-		t.Fatalf("Check() 予期しないエラー: %v", err)
-	}
-	if len(got.Rows) != 3 {
-		t.Errorf("Rows = %d 件, want 3", len(got.Rows))
-	}
-	if errW.Len() != 0 {
-		t.Errorf("上限以下なのに errW に書き込みがあります: %q", errW.String())
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var errW bytes.Buffer
+			var res *redash.Result
+			if !tt.nilResult {
+				res = testResult(tt.rows)
+			}
+			q := config.Query{MaxRows: tt.maxRows, OnExceed: tt.onExceed}
 
-// TestCheck_ExceedError は on_exceed: error のとき、超過した結果を一切
-// 返さないことを見る。呼び出し側はこの nil を output.Render に渡せば
-// 安全に倒れる。stdout に部分出力を書かない、という受け入れ条件の核心。
-func TestCheck_ExceedError(t *testing.T) {
-	var errW bytes.Buffer
-	res := testResult(5)
-	q := config.Query{MaxRows: 3, OnExceed: config.OnExceedError}
+			got, err := Check(&errW, res, q)
 
-	got, err := Check(&errW, res, q)
-	if got != nil {
-		t.Errorf("エラー時の Result は nil であるべきですが %#v でした", got)
-	}
-	var exceeded *ExceededError
-	if !errors.As(err, &exceeded) {
-		t.Fatalf("ExceededError を期待しましたが %#v でした", err)
-	}
-	if exceeded.MaxRows != 3 || exceeded.Got != 5 {
-		t.Errorf("ExceededError = %+v, want {MaxRows:3 Got:5}", exceeded)
-	}
-	if errW.Len() != 0 {
-		t.Errorf("on_exceed: error は errW に何も書かないはずですが %q が書かれました", errW.String())
-	}
-}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("エラーを期待しましたが nil でした")
+				}
+				if got != nil {
+					t.Errorf("エラー時の Result は nil であるべきですが %#v でした", got)
+				}
+				if tt.wantExceed {
+					var exceeded *ExceededError
+					if !errors.As(err, &exceeded) {
+						t.Fatalf("ExceededError を期待しましたが %#v でした", err)
+					}
+					if exceeded.MaxRows != tt.maxRows || exceeded.Got != tt.rows {
+						t.Errorf("ExceededError = %+v, want {MaxRows:%d Got:%d}", exceeded, tt.maxRows, tt.rows)
+					}
+				}
+				if errW.Len() != 0 {
+					t.Errorf("エラー時は errW に何も書かないはずですが %q が書かれました", errW.String())
+				}
+				return
+			}
 
-// TestCheck_OnExceedDefaultIsError は on_exceed 未指定（空文字列）でも
-// error と同じ挙動になることを見る。defaults() が埋めるはずの値だが、
-// 呼び出し側が解決前の値を渡した場合の fail-closed を保証する。
-func TestCheck_OnExceedDefaultIsError(t *testing.T) {
-	var errW bytes.Buffer
-	res := testResult(5)
-	q := config.Query{MaxRows: 3}
-
-	got, err := Check(&errW, res, q)
-	if got != nil {
-		t.Errorf("Result は nil であるべきですが %#v でした", got)
-	}
-	var exceeded *ExceededError
-	if !errors.As(err, &exceeded) {
-		t.Fatalf("ExceededError を期待しましたが %#v でした", err)
-	}
-}
-
-func TestCheck_Truncate(t *testing.T) {
-	var errW bytes.Buffer
-	res := testResult(5)
-	q := config.Query{MaxRows: 3, OnExceed: config.OnExceedTruncate}
-
-	got, err := Check(&errW, res, q)
-	if err != nil {
-		t.Fatalf("Check() 予期しないエラー: %v", err)
-	}
-	if len(got.Rows) != 3 {
-		t.Fatalf("Rows = %d 件, want 3", len(got.Rows))
-	}
-	for i, row := range got.Rows {
-		if row[0] != i {
-			t.Errorf("Rows[%d] = %v, 先頭からの3件であるべきです", i, row)
-		}
-	}
-	if !strings.Contains(errW.String(), "切り詰め") {
-		t.Errorf("truncate した事実が errW に書かれていません: %q", errW.String())
-	}
-}
-
-func TestCheck_NilResult(t *testing.T) {
-	var errW bytes.Buffer
-	if _, err := Check(&errW, nil, config.Query{MaxRows: 10}); err == nil {
-		t.Fatal("結果が nil のときエラーを期待しましたが nil でした")
-	}
-}
-
-func TestCheck_MaxRowsNotSet(t *testing.T) {
-	var errW bytes.Buffer
-	if _, err := Check(&errW, testResult(1), config.Query{MaxRows: 0}); err == nil {
-		t.Fatal("max_rows が未指定のときエラーを期待しましたが nil でした")
-	}
-}
-
-func TestCheck_UnknownOnExceed(t *testing.T) {
-	var errW bytes.Buffer
-	q := config.Query{MaxRows: 1, OnExceed: config.OnExceed("bogus")}
-	if _, err := Check(&errW, testResult(2), q); err == nil {
-		t.Fatal("扱えない on_exceed のときエラーを期待しましたが nil でした")
+			if err != nil {
+				t.Fatalf("Check() 予期しないエラー: %v", err)
+			}
+			if len(got.Rows) != tt.wantRows {
+				t.Fatalf("Rows = %d 件, want %d", len(got.Rows), tt.wantRows)
+			}
+			for i, row := range got.Rows {
+				if row[0] != i {
+					t.Errorf("Rows[%d] = %v, 先頭からの %d 件であるべきです", i, row, tt.wantRows)
+				}
+			}
+			if tt.wantWarning && !strings.Contains(errW.String(), "切り詰め") {
+				t.Errorf("切り詰めた事実が errW に書かれていません: %q", errW.String())
+			}
+			if !tt.wantWarning && errW.Len() != 0 {
+				t.Errorf("警告を期待していないのに errW に書き込みがあります: %q", errW.String())
+			}
+		})
 	}
 }
