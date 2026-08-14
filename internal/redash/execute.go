@@ -44,9 +44,11 @@ type queryRequest struct {
 const maxAgeAlwaysExecute = 0
 
 // errConnectFailed は do がリクエストを送る前後で接続そのものに失敗したことを表す。
+// submit・wait・fetch のどの呼び出しでも起こりうる、do 共通の分類。
 //
-// wait のポーリング（GET /api/jobs/{id}）がこの形のエラーに遭遇したときだけ
-// 一時的な障害として再試行する。詳しくは isRetryableWaitErr と ADR-0012。
+// 現状これを再試行の判定に使っているのは wait（isRetryableWaitErr）だけだが、
+// それは「投入・取得にも同じ方針を適用するか」を本 Issue のスコープ外とした
+// ためであり、この分類自体が wait 専用というわけではない（ADR-0012）。
 var errConnectFailed = errors.New("Redash への接続に失敗しました")
 
 // Execute はクエリを投入し、完了を待ち、結果を返す。
@@ -140,18 +142,30 @@ func (c *Client) wait(ctx context.Context, jobID string, first *job) (int64, err
 			return *cur.QueryResultID, nil
 		}
 
-		if err := sleep(ctx, c.pollInterval); err != nil {
+		cur, err = c.pollNext(ctx, jobID)
+		if err != nil {
 			return 0, err
 		}
+	}
+}
 
-		next, err := c.jobStatus(ctx, jobID)
-		if err != nil {
-			if !isRetryableWaitErr(err) {
-				return 0, err
-			}
-			continue
+// pollNext は poll_interval だけ待ってから GET /api/jobs/{id} を叩く。
+//
+// 一時的な障害（接続失敗・5xx）で失敗した場合は、cur を書き戻さずに
+// 同じ間隔でもう一度叩き直す。これにより wait 側は変化していない
+// 直前のジョブ状態を無駄に finished で再評価せずに済む。
+func (c *Client) pollNext(ctx context.Context, jobID string) (*job, error) {
+	for {
+		if err := sleep(ctx, c.pollInterval); err != nil {
+			return nil, err
 		}
-		cur = next
+		next, err := c.jobStatus(ctx, jobID)
+		if err == nil {
+			return next, nil
+		}
+		if !isRetryableWaitErr(err) {
+			return nil, err
+		}
 	}
 }
 
@@ -267,10 +281,9 @@ func (c *Client) do(ctx context.Context, method, url string, body []byte, dst an
 		// endpoint から組み立てたもので、クエリも認証情報も持たない。
 		// API KEY はヘッダにあるので出ない。リクエストのダンプも載せない。
 		//
-		// errConnectFailed で包む。wait のポーリング（GET /api/jobs/{id}）は
-		// この形のエラーだけを一時的な障害として再試行対象にする
-		// （LB の瞬断や DNS の一時的な失敗を、走り続けているジョブごと
-		// 捨てないため。ADR-0012）。
+		// errConnectFailed で包む。呼び出し元（今は wait だけ）はこれを見て
+		// 一時的な障害かどうかを判定できる（LB の瞬断や DNS の一時的な失敗を、
+		// 走り続けているジョブごと捨てないため。ADR-0012）。
 		return fmt.Errorf("%w: %w", errConnectFailed, err)
 	}
 	defer func() {
