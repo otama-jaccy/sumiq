@@ -43,6 +43,12 @@ type queryRequest struct {
 // 保証できない。
 const maxAgeAlwaysExecute = 0
 
+// errConnectFailed は do がリクエストを送る前後で接続そのものに失敗したことを表す。
+//
+// wait のポーリング（GET /api/jobs/{id}）がこの形のエラーに遭遇したときだけ
+// 一時的な障害として再試行する。詳しくは isRetryableWaitErr と ADR-0012。
+var errConnectFailed = errors.New("Redash への接続に失敗しました")
+
 // Execute はクエリを投入し、完了を待ち、結果を返す。
 //
 // ctx のキャンセルで中断できる。加えて Client.timeout を上限として、
@@ -112,6 +118,13 @@ func (c *Client) submit(ctx context.Context, q Query) (*job, error) {
 }
 
 // wait はジョブが完了するまでポーリングし、結果の ID を返す。
+//
+// GET /api/jobs/{id} が一時的な障害（接続失敗・5xx）で失敗しても、それだけで
+// ジョブを諦めない。GET は冪等でジョブ ID は検証済み、かつジョブは Redash 側で
+// 走り続けるため、同じ間隔で叩き直すのが安全（ADR-0012）。リトライに専用の
+// 上限は設けず、Execute が execCtx に設定した timeout まで続ける。
+// 認証・権限の失敗やその他の 4xx、ジョブ自体の失敗（finished が返すもの）は
+// 再試行しても状況が変わらないため対象にしない。
 func (c *Client) wait(ctx context.Context, jobID string, first *job) (int64, error) {
 	cur := first
 	for {
@@ -131,11 +144,33 @@ func (c *Client) wait(ctx context.Context, jobID string, first *job) (int64, err
 			return 0, err
 		}
 
-		cur, err = c.jobStatus(ctx, jobID)
+		next, err := c.jobStatus(ctx, jobID)
 		if err != nil {
-			return 0, err
+			if !isRetryableWaitErr(err) {
+				return 0, err
+			}
+			continue
 		}
+		cur = next
 	}
+}
+
+// isRetryableWaitErr は wait 内の GET /api/jobs/{id} の失敗を、ジョブを
+// 諦めずに叩き直してよい一時的な障害として扱うかを判定する。
+//
+// 対象は接続そのものの失敗（DNS・タイムアウト・コネクションリセット等、
+// errConnectFailed で包まれる）と 5xx の APIError に限る。AuthError（401/403/
+// 404 の認証扱い）や 5xx 未満の APIError は再試行しても直らず、対象にすると
+// 本当の失敗の検知が遅れるだけになる。
+func isRetryableWaitErr(err error) bool {
+	if errors.Is(err, errConnectFailed) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 500
+	}
+	return false
 }
 
 // jobStatus は GET /api/jobs/{job_id} を1回叩く。
@@ -231,7 +266,12 @@ func (c *Client) do(ctx context.Context, method, url string, body []byte, dst an
 		// それ以外の err は *url.Error でメソッドと URL を含む。URL は検証済みの
 		// endpoint から組み立てたもので、クエリも認証情報も持たない。
 		// API KEY はヘッダにあるので出ない。リクエストのダンプも載せない。
-		return fmt.Errorf("Redash への接続に失敗しました: %w", err)
+		//
+		// errConnectFailed で包む。wait のポーリング（GET /api/jobs/{id}）は
+		// この形のエラーだけを一時的な障害として再試行対象にする
+		// （LB の瞬断や DNS の一時的な失敗を、走り続けているジョブごと
+		// 捨てないため。ADR-0012）。
+		return fmt.Errorf("%w: %w", errConnectFailed, err)
 	}
 	defer func() {
 		// 本文を読み切らずに閉じると接続が再利用されない。エラー時は
