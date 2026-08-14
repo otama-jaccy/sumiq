@@ -20,6 +20,8 @@ import (
 //
 // BaseQueryRunner.limit_query が " LIMIT 1000" に固定しており、API から
 // 数値を渡す経路が無い（ADR-0003 §10 のコンテキストにある redash 本体の抜粋）。
+// config.defaults() が Query.MaxRows の既定値に同じ 1000 を置いているのは、
+// この値に合わせた意図的な一致であり、変えるときは両方を見ること。
 const maxAutoLimitRows = 1000
 
 // EffectiveAutoLimit は ds の上書きを踏まえた、このデータソースに使う
@@ -33,36 +35,31 @@ func EffectiveAutoLimit(q config.Query, ds config.DataSource) bool {
 	if ds.AutoLimit != nil {
 		return *ds.AutoLimit
 	}
-	return effectiveBool(q.AutoLimit, true)
-}
-
-// effectiveBool はゼロ値と「未指定」を区別する *bool を、既定値付きで解く。
-func effectiveBool(p *bool, def bool) bool {
-	if p == nil {
-		return def
+	if q.AutoLimit != nil {
+		return *q.AutoLimit
 	}
-	return *p
+	return true
 }
 
-// ValidateQuery は、実際に使う auto_limit の値と max_rows の組み合わせが
-// 到達可能かを検証する。
+// ValidateQuery は、データソース ds に対して実際に使う auto_limit の値と
+// max_rows の組み合わせが到達可能かを検証する。
 //
-// autoLimit は EffectiveAutoLimit で解決した後の値を渡すこと。auto_limit は
-// データソース単位で上書きされるため、グローバルの config.Query.AutoLimit を
-// そのまま見ると、上書きで false になっているデータソースにまで
-// 到達不能エラーを出してしまう。
+// auto_limit は EffectiveAutoLimit 自身が解決するため、呼び出し側に
+// 解決済みの bool を渡させない。渡させると、グローバルの
+// config.Query.AutoLimit をそのまま見て呼んでしまい、ds 側の上書きで
+// false になっているデータソースにまで到達不能エラーを出す事故につながる。
 //
 // auto_limit が効くと Redash は結果を maxAutoLimitRows 件で切るため、
 // max_rows がそれを超えていても超過判定に到達しない。
-func ValidateQuery(autoLimit bool, maxRows int) error {
-	if !autoLimit {
+func ValidateQuery(q config.Query, ds config.DataSource) error {
+	if !EffectiveAutoLimit(q, ds) {
 		return nil
 	}
-	if maxRows > maxAutoLimitRows {
+	if q.MaxRows > maxAutoLimitRows {
 		return fmt.Errorf("query.auto_limit: true のとき query.max_rows は %d を超えて指定できません: %d。"+
 			"Redash は auto_limit が効くと結果を %d 件で切るため、それを超える max_rows には到達できません。"+
 			"max_rows を %d 以下にするか、auto_limit を false にしてください",
-			maxAutoLimitRows, maxRows, maxAutoLimitRows, maxAutoLimitRows)
+			maxAutoLimitRows, q.MaxRows, maxAutoLimitRows, maxAutoLimitRows)
 	}
 	return nil
 }
