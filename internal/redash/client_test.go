@@ -205,9 +205,19 @@ func TestErrorMessages(t *testing.T) {
 			wantIn: []string{"job-1", "4"},
 		},
 		{
-			name:   "TimeoutError",
-			err:    &TimeoutError{JobID: "job-1", Timeout: 5 * time.Minute},
+			name:   "TimeoutError_完了待ち",
+			err:    &TimeoutError{Phase: PhaseWait, JobID: "job-1", Timeout: 5 * time.Minute},
 			wantIn: []string{"job-1", "5m0s", "実行され続けます"},
+		},
+		{
+			name:   "TimeoutError_投入",
+			err:    &TimeoutError{Phase: PhaseSubmit, Timeout: 5 * time.Minute},
+			wantIn: []string{"5m0s", "分かりません", "endpoint"},
+		},
+		{
+			name:   "TimeoutError_取得",
+			err:    &TimeoutError{Phase: PhaseFetch, JobID: "job-1", Timeout: 5 * time.Minute},
+			wantIn: []string{"job-1", "5m0s", "結果の取得"},
 		},
 	}
 

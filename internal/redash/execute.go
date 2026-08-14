@@ -63,7 +63,7 @@ func (c *Client) Execute(ctx context.Context, q Query) (*Result, error) {
 
 	first, err := c.submit(execCtx, q)
 	if err != nil {
-		return nil, c.classifyContextErr(ctx, execCtx, "", err)
+		return nil, c.classifyContextErr(ctx, execCtx, PhaseSubmit, "", err)
 	}
 	// 以降 URL に使う ID はここで検証したものだけ。ポーリングの応答が返す
 	// id は使わない（checkJobID のコメントを参照）。
@@ -74,12 +74,14 @@ func (c *Client) Execute(ctx context.Context, q Query) (*Result, error) {
 
 	resultID, err := c.wait(execCtx, jobID, first)
 	if err != nil {
-		return nil, c.classifyContextErr(ctx, execCtx, jobID, err)
+		return nil, c.classifyContextErr(ctx, execCtx, PhaseWait, jobID, err)
 	}
 
+	// ここから先、ジョブは完了している。打ち切ったときに「まだ動いている」と
+	// 伝えないよう、段を分けて渡す。
 	res, err := c.fetch(execCtx, resultID)
 	if err != nil {
-		return nil, c.classifyContextErr(ctx, execCtx, jobID, err)
+		return nil, c.classifyContextErr(ctx, execCtx, PhaseFetch, jobID, err)
 	}
 	return res, nil
 }
@@ -180,7 +182,7 @@ func sleep(ctx context.Context, d time.Duration) error {
 // context.WithTimeout で作った ctx が期限切れになると、原因が
 // 「利用者が Ctrl-C を押した」なのか「redash.timeout を超えた」なのかが
 // DeadlineExceeded 一つに潰れる。親を先に見て区別する。
-func (c *Client) classifyContextErr(parent, exec context.Context, jobID string, err error) error {
+func (c *Client) classifyContextErr(parent, exec context.Context, phase Phase, jobID string, err error) error {
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
@@ -188,7 +190,7 @@ func (c *Client) classifyContextErr(parent, exec context.Context, jobID string, 
 		return fmt.Errorf("Redash のクエリ実行を中断しました: %w", parent.Err())
 	}
 	if errors.Is(exec.Err(), context.DeadlineExceeded) {
-		return &TimeoutError{JobID: jobID, Timeout: c.timeout}
+		return &TimeoutError{Phase: phase, JobID: jobID, Timeout: c.timeout}
 	}
 	return err
 }
@@ -313,8 +315,18 @@ func (c *Client) errorMessage(resp *http.Response) string {
 }
 
 // cleanMessage は応答由来の文字列をエラーに載せられる形に整える。
+//
+// 秘密が混ざりうる経路（HTTP の本文、ジョブの error）はこちらを通す。
 func (c *Client) cleanMessage(s string) string {
-	s = c.scrub(s)
+	return clipMessage(c.scrub(s))
+}
+
+// clipMessage は改行を潰し、長さに上限をかける。
+//
+// Client を持たない場所（ジョブ ID・列名の検証）から使う。これらは
+// API KEY が混ざる経路ではないが、長さは Redash 次第であり、
+// 数 KB の文字列をそのまま端末に吐かせない。
+func clipMessage(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	r := []rune(s)
 	if len(r) > maxErrorMessageRunes {

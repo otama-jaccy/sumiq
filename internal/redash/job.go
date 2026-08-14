@@ -78,11 +78,11 @@ func checkJobID(id string) error {
 		return fmt.Errorf("Redash の応答にジョブ ID がありません")
 	}
 	if id == "." || id == ".." || strings.ContainsAny(id, "/%") {
-		return fmt.Errorf("Redash が URL に使えないジョブ ID を返しました: %q", id)
+		return fmt.Errorf("Redash が URL に使えないジョブ ID を返しました: %q", clipMessage(id))
 	}
 	for _, r := range id {
 		if r < 0x20 || r == 0x7f {
-			return fmt.Errorf("Redash が URL に使えないジョブ ID を返しました: %q", id)
+			return fmt.Errorf("Redash が URL に使えないジョブ ID を返しました: %q", clipMessage(id))
 		}
 	}
 	return nil
