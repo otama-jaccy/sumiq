@@ -273,6 +273,20 @@ func (s Summary) Masked() []ColumnMask {
 	return out
 }
 
+// MaskedKept は実際にマスクしたが出力には残る列（method: none と drop 以外）を
+// 入力順に返す。drop された列は Dropped が別に返すため、ここには含めない。
+// 同じ列を両方に出すと、どちらが「値が変わった」でどちらが「列ごと消えた」かが
+// 呼び出し側で見分けにくくなる。
+func (s Summary) MaskedKept() []ColumnMask {
+	out := make([]ColumnMask, 0, len(s.Columns))
+	for _, c := range s.Columns {
+		if c.Method != config.MaskNone && c.Method != config.MaskDrop {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Dropped は drop で出力から消えた列名を入力順に返す。
 func (s Summary) Dropped() []string {
 	var out []string

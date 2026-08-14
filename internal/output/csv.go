@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"io"
 
+	"github.com/otama-jaccy/sumiq/internal/mask"
 	"github.com/otama-jaccy/sumiq/internal/redash"
 )
 
@@ -14,23 +15,17 @@ import (
 func renderCSV(out io.Writer, res *redash.Result) error {
 	w := csv.NewWriter(out)
 
-	header := make([]string, len(res.Columns))
-	for i, c := range res.Columns {
-		header[i] = c.Name
-	}
-	if err := w.Write(header); err != nil {
+	if err := w.Write(columnNames(res.Columns)); err != nil {
 		return err
 	}
 
+	record := make([]string, len(res.Columns))
 	for _, row := range res.Rows {
-		record := make([]string, len(res.Columns))
 		for i := range record {
-			var v any
-			if i < len(row) {
-				v = row[i]
-			}
+			v := cellAt(row, i)
+			record[i] = ""
 			if v != nil {
-				record[i] = renderScalar(v)
+				record[i] = mask.RenderValue(v)
 			}
 		}
 		if err := w.Write(record); err != nil {
