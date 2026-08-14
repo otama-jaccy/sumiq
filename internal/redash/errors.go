@@ -80,16 +80,24 @@ func (e *JobError) Error() string {
 	return fmt.Sprintf("Redash のクエリ実行に失敗しました (ジョブ %s): %s", e.JobID, e.Message)
 }
 
-// TimeoutError は timeout 以内にジョブが終わらなかったことを表す。
+// TimeoutError は timeout 以内に処理が終わらなかったことを表す。
 //
-// ジョブは Redash 側で動き続けている。sumiq は待つのをやめるだけで、
-// クエリを止めるわけではない。
+// JobID が空でなければジョブは Redash 側で動き続けている。sumiq は待つのを
+// やめるだけで、クエリを止めるわけではない。
 type TimeoutError struct {
+	// JobID はジョブ投入前に打ち切った場合は空。
 	JobID   string
 	Timeout time.Duration
 }
 
 func (e *TimeoutError) Error() string {
+	// ジョブ投入前に打ち切った場合、Redash には何も残っていない。
+	// 「ジョブは動き続けます」と伝えると原因を見誤る。応答が無いのは
+	// 接続の問題であって、クエリの重さではない。
+	if e.JobID == "" {
+		return fmt.Sprintf("Redash が %s 以内に応答しませんでした。"+
+			"クエリは投入されていません。redash.endpoint と接続を確認してください", e.Timeout)
+	}
 	return fmt.Sprintf("Redash のクエリが %s 以内に終わりませんでした (ジョブ %s)。"+
 		"ジョブは Redash 側で実行され続けます。redash.timeout を延ばすか、クエリを軽くしてください",
 		e.Timeout, e.JobID)

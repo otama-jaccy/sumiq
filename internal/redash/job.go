@@ -40,9 +40,14 @@ type job struct {
 // serialize_job は error が入る経路で status も 4 に落とすが、こちらが
 // 依存しているのは「エラー文言があれば失敗」という一段強い条件の方。
 // status の対応表が変わっても失敗を取りこぼさない。
-func (j *job) finished() (bool, error) {
+//
+// Client のメソッドにしてあるのは、Redash の文言をそのまま JobError に
+// 移さないため。ジョブの error にはクエリランナーの例外がそのまま入り、
+// 数 KB の traceback になることがある。HTTP 由来の文言と同じく
+// cleanMessage を通し、API KEY の伏せ字と長さの上限を効かせる。
+func (c *Client) finished(j *job) (bool, error) {
 	if j.Error != "" {
-		return false, &JobError{JobID: j.ID, Status: j.Status, Message: j.Error}
+		return false, &JobError{JobID: j.ID, Status: j.Status, Message: c.cleanMessage(j.Error)}
 	}
 
 	switch j.Status {
