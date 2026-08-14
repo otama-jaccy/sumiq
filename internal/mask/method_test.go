@@ -293,8 +293,8 @@ func TestRenderValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := renderValue(tt.value); got != tt.want {
-				t.Errorf("renderValue(%#v) = %q, want %q", tt.value, got, tt.want)
+			if got := RenderValue(tt.value); got != tt.want {
+				t.Errorf("RenderValue(%#v) = %q, want %q", tt.value, got, tt.want)
 			}
 		})
 	}
