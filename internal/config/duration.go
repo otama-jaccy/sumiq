@@ -36,6 +36,13 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 	if v < 0 {
 		return fmt.Errorf("line %d: duration に負の値は指定できません %q", n.Line, s)
 	}
+	// 0 はゼロ値、すなわち「未指定」と同じになる。レイヤードマージは未指定を
+	// 上書きの対象から外すため、0s と書いても下のレイヤの値やデフォルトが
+	// そのまま残る。書いた値が黙って別の値に差し替わるので、書けたことにしない。
+	if v == 0 {
+		return fmt.Errorf("line %d: duration に 0 は指定できません %q。"+
+			"未指定と区別できないため、項目ごと書かないでください", n.Line, s)
+	}
 	*d = Duration(v)
 	return nil
 }

@@ -75,6 +75,9 @@ type Resolved struct {
 	// 置けるので、「同じファイル内の重複」と「近いファイルによる上書き」を
 	// レイヤの比較だけでは区別できない。
 	dataSourceOrigins map[string]layered
+	// defaultActionOrigin は現在の masking.default_action を指定したレイヤ。
+	// 緩める指定を弾くとき、厳しい方がどこ由来かをエラーに書くために持つ。
+	defaultActionOrigin layered
 	// files は実際に読んだファイルを弱いレイヤ順に並べたもの。
 	files []SourceFile
 }
@@ -144,7 +147,7 @@ func merge(layers []layered) (*Resolved, error) {
 		}
 		mergeQuery(&res.Config.Query, l.cfg.Query)
 		mergeOutput(&res.Config.Output, l.cfg.Output)
-		if err := mergeMasking(&res.Config.Masking, l); err != nil {
+		if err := res.mergeMasking(&res.Config.Masking, l); err != nil {
 			return nil, err
 		}
 		if err := res.mergeDataSources(l); err != nil {
@@ -200,30 +203,35 @@ func mergeOutput(dst *Output, src Output) {
 }
 
 // mergeMasking はマスク方針を畳む。ここがこのパッケージで最も壊すと危険な箇所。
-func mergeMasking(dst *Masking, l layered) error {
+func (r *Resolved) mergeMasking(dst *Masking, l layered) error {
 	src := l.cfg.Masking
 
 	// default_action は厳しくする方向にしか動かさない。
 	if src.DefaultAction != "" {
 		if src.DefaultAction.strictness() < dst.DefaultAction.strictness() {
-			return fmt.Errorf("%s: masking.default_action を %q から %q に緩めることはできません。"+
-				"マスクの既定は厳しくする方向にしか上書きできません",
-				l.origin(), dst.DefaultAction, src.DefaultAction)
+			// 厳しい方の出どころを必ず添える。これが無いと、利用者は
+			// 名前の挙がったファイルを開いて緩い値を見つけ、なぜ怒られたのか
+			// 分からなくなる。厳しい値が自分のユーザ設定由来のときが最悪で、
+			// リポジトリの中を探しても原因が見つからない。
+			return fmt.Errorf("%s: masking.default_action を %q に緩めることはできません。"+
+				"%q は %s で指定されています。マスクの既定は厳しくする方向にしか上書きできません",
+				l.origin(), src.DefaultAction, dst.DefaultAction, r.defaultActionOrigin.origin())
 		}
 		dst.DefaultAction = src.DefaultAction
+		r.defaultActionOrigin = l
 	}
 
 	// rules は和集合。上書きも削除もせず、後ろに足すだけ。
-	for i, r := range src.Rules {
+	for i, rule := range src.Rules {
 		// method: none は「この列は素通ししてよい」という明示的な許可であり、
 		// allowlist 運用に穴を開ける唯一の手段。レビューされないファイルから
 		// 書けると弱化そのものになるため、共有ファイル以外では受け付けない。
-		if r.Method == MaskNone && !l.layer.Reviewed() {
+		if rule.Method == MaskNone && !l.layer.Reviewed() {
 			return fmt.Errorf("%s: masking.rules[%d] %v: method: none は共有ファイル（%s）にのみ書けます。"+
 				"マスクを外す指定はレビューの対象でなければなりません",
-				l.origin(), i, r.Patterns, SharedFileName)
+				l.origin(), i, rule.Patterns, SharedFileName)
 		}
-		dst.Rules = append(dst.Rules, r)
+		dst.Rules = append(dst.Rules, rule)
 	}
 	return nil
 }
@@ -260,15 +268,39 @@ func (r *Resolved) mergeDataSources(l layered) error {
 	return nil
 }
 
-// setDataSource は同じ名前があれば置き換え、無ければ末尾に足す。
+// setDataSource は同じ名前があれば項目ごとに畳み、無ければ末尾に足す。
+//
+// 構造体を丸ごと差し替えてはならない。共有設定は複数ファイルになりうるため、
+// リポジトリルートで analytics に default_action: redact を付け、
+// packages/etl/sumiq.yaml で同じ名前に auto_limit: false だけを足す
+// （ADR-0003 §10 が Oracle / SQL Server 向けに勧めている書き方）と、
+// 書いていない default_action が黙って消えてマスクが外れる。
 func (r *Resolved) setDataSource(ds DataSource) {
 	for i := range r.Config.DataSources {
 		if r.Config.DataSources[i].Name == ds.Name {
-			r.Config.DataSources[i] = ds
+			r.Config.DataSources[i] = mergeDataSource(r.Config.DataSources[i], ds)
 			return
 		}
 	}
 	r.Config.DataSources = append(r.Config.DataSources, ds)
+}
+
+// mergeDataSource は src で指定された項目だけを dst に上書きする。
+func mergeDataSource(dst, src DataSource) DataSource {
+	if src.ID != 0 {
+		dst.ID = src.ID
+	}
+	if src.Description != "" {
+		dst.Description = src.Description
+	}
+	if src.DefaultAction != "" {
+		dst.DefaultAction = src.DefaultAction
+	}
+	if src.AutoLimit != nil {
+		v := *src.AutoLimit
+		dst.AutoLimit = &v
+	}
+	return dst
 }
 
 // checkDataSourceActions はレビューされないレイヤで定義されたデータソースが、
@@ -281,14 +313,14 @@ func (r *Resolved) setDataSource(ds DataSource) {
 func (r *Resolved) checkDataSourceActions() error {
 	global := r.Config.Masking.DefaultAction
 	for _, ds := range r.Config.DataSources {
-		layer := r.dataSourceOrigins[ds.Name].layer
-		if layer.Reviewed() || ds.DefaultAction == "" {
+		origin := r.dataSourceOrigins[ds.Name]
+		if origin.layer.Reviewed() || ds.DefaultAction == "" {
 			continue
 		}
 		if ds.DefaultAction.strictness() < global.strictness() {
-			return fmt.Errorf("%s で定義された data_sources (%s): default_action: %q は"+
+			return fmt.Errorf("%s: data_sources (%s): default_action: %q は"+
 				"グローバル既定 %q より緩いため指定できません",
-				layer.String(), ds.Name, ds.DefaultAction, global)
+				origin.origin(), ds.Name, ds.DefaultAction, global)
 		}
 	}
 	return nil
@@ -313,15 +345,15 @@ func (r *Resolved) checkDataSourceIDs() error {
 		}
 	}
 	for _, ds := range r.Config.DataSources {
-		layer := r.dataSourceOrigins[ds.Name].layer
-		if layer.Reviewed() {
+		origin := r.dataSourceOrigins[ds.Name]
+		if origin.layer.Reviewed() {
 			continue
 		}
 		if name, ok := reviewed[ds.ID]; ok {
-			return fmt.Errorf("%s で定義された data_sources (%s): id: %d は共有設定の %s と同じです。"+
+			return fmt.Errorf("%s: data_sources (%s): id: %d は共有設定の %s と同じです。"+
 				"レビューされない設定から、レビュー済みのデータソースに別名を付けることはできません。"+
 				"マスク方針は名前ではなく接続先に紐づくため、%s をそのまま使ってください",
-				layer.String(), ds.Name, ds.ID, name, name)
+				origin.origin(), ds.Name, ds.ID, name, name)
 		}
 	}
 	return nil

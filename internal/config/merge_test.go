@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -505,6 +506,61 @@ func TestResolve_ローカルデータソースのDefaultAction(t *testing.T) {
 			}
 			mustResolve(t, tt.files)
 		})
+	}
+}
+
+// 共有設定は複数ファイルになりうるので、データソースの再定義は項目ごとに畳む。
+// 構造体を丸ごと差し替えると、書いていない項目が黙って消える。
+func TestResolve_データソースは項目ごとに畳む(t *testing.T) {
+	root := t.TempDir()
+	mkGitRoot(t, root)
+	writeFile(t, root, SharedFileName,
+		"version: 1\ndata_sources: [{name: analytics, id: 3, description: 本番, default_action: redact}]\n")
+	// ADR-0003 §10 が Oracle / SQL Server 向けに勧めている書き方。
+	// auto_limit だけを足すつもりで default_action が消えてはならない。
+	sub := filepath.Join(root, "packages", "etl")
+	writeFile(t, sub, SharedFileName,
+		"version: 1\ndata_sources: [{name: analytics, id: 3, auto_limit: false}]\n")
+
+	res, err := Resolve(testOptions(sub))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	ds, _, ok := res.DataSource("analytics")
+	if !ok {
+		t.Fatal("DataSource(analytics) が見つかりません")
+	}
+	if ds.DefaultAction != ActionRedact {
+		t.Errorf("default_action = %q, want %q。書いていない項目が消えている", ds.DefaultAction, ActionRedact)
+	}
+	if ds.Description != "本番" {
+		t.Errorf("description = %q, want 本番", ds.Description)
+	}
+	if ds.AutoLimit == nil || *ds.AutoLimit {
+		t.Errorf("auto_limit = %v, want false", ds.AutoLimit)
+	}
+}
+
+// 緩める指定を弾くとき、厳しい方の出どころをエラーに含めること。
+// これが無いと、名前の挙がったファイルを開いても原因が見つからない。
+func TestResolve_DefaultActionのエラーは厳しい方の出どころを示す(t *testing.T) {
+	dir := t.TempDir()
+	mkGitRoot(t, dir)
+	opts := testOptions(dir)
+	userPath := writeFile(t, dir, "user-config.yaml", "version: 1\nmasking: {default_action: redact}\n")
+	opts.UserConfigPath = userPath
+	writeFile(t, dir, SharedFileName, "version: 1\nmasking: {default_action: none}\n")
+
+	_, err := Resolve(opts)
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want error")
+	}
+	// 緩い側（共有設定）と厳しい側（ユーザ設定）の両方が分かること。
+	if !strings.Contains(err.Error(), SharedFileName) {
+		t.Errorf("error = %q, want に緩い側のファイル名を含む", err.Error())
+	}
+	if !strings.Contains(err.Error(), userPath) {
+		t.Errorf("error = %q, want に厳しい側の出どころ %q を含む", err.Error(), userPath)
 	}
 }
 
