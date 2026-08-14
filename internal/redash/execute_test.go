@@ -153,8 +153,8 @@ func TestExecuteRespectsPollInterval(t *testing.T) {
 	}
 }
 
-// TestExecuteWaitRetriesOnTransientFailure は一時的な障害（5xx・接続失敗）を
-// 再試行し、次のポーリングで成功すればジョブを諦めないことを見る（ADR-0012）。
+// TestExecuteWaitRetriesOnTransientFailure は一時的な障害（5xx・429・接続失敗）を
+// 再試行し、次のポーリングで成功すればジョブを諦めないことを見る。
 func TestExecuteWaitRetriesOnTransientFailure(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -164,6 +164,12 @@ func TestExecuteWaitRetriesOnTransientFailure(t *testing.T) {
 		{
 			name:         "5xx",
 			firstJobResp: respond(http.StatusBadGateway, `{"message":"Bad Gateway"}`),
+		},
+		{
+			// レート制限。再試行しても poll_interval だけ待つので、
+			// LB の瞬断と同じ「一時的な障害」として扱う。
+			name:         "429",
+			firstJobResp: respond(http.StatusTooManyRequests, `{"message":"Too Many Requests"}`),
 		},
 		{
 			name:         "接続失敗",
