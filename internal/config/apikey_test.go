@@ -220,6 +220,60 @@ func TestResolve_git管理下のAPIKeyはエラー(t *testing.T) {
 	}
 }
 
+// 検査対象は「勝ったレイヤ」ではなく api_key を書いた全ファイル。
+//
+// 環境変数で API KEY を渡すのは ADR-0003 §5 の経路1、つまり最も普通の使い方で、
+// そのときファイルの指定は必ず負ける。勝者だけを見ていると、共有ファイルに
+// コミットされた api_key を素通しすることになる。構造で防ぐはずの事故が、
+// 一番ありふれた構成でだけ防げていない状態になる。
+func TestResolve_負けたレイヤのAPIKeyもgit検査する(t *testing.T) {
+	tests := []struct {
+		name  string
+		files layerFiles
+	}{
+		{
+			name: "環境変数が勝っても共有ファイルの api_key を検出する",
+			files: layerFiles{
+				shared:  "version: 1\nredash: {api_key: LEAKED}\n",
+				environ: []string{EnvAPIKey + "=from-env"},
+			},
+		},
+		{
+			name: "ローカルが勝っても共有ファイルの api_key を検出する",
+			files: layerFiles{
+				shared: "version: 1\nredash: {api_key: LEAKED}\n",
+				local:  "version: 1\nredash: {api_key: from-local}\n",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mkGitRoot(t, dir)
+			opts := testOptions(dir)
+			opts.Environ = tt.files.environ
+			if opts.Environ == nil {
+				opts.Environ = []string{}
+			}
+			sharedPath := writeFile(t, dir, SharedFileName, tt.files.shared)
+			if tt.files.local != "" {
+				writeFile(t, dir, LocalFileName, tt.files.local)
+			}
+			// 共有ファイルだけが git 管理下。ローカルは gitignore される前提。
+			opts.Tracked = func(path string) (bool, error) { return path == sharedPath, nil }
+
+			_, err := Resolve(opts)
+			if err == nil {
+				t.Fatal("Resolve() error = nil, want error。コミットされた api_key が素通りしている")
+			}
+			if !strings.Contains(err.Error(), "git の管理下にあります") {
+				t.Errorf("Resolve() error = %q", err.Error())
+			}
+		})
+	}
+}
+
 // 環境変数由来の api_key には git の検査を掛けない。ファイルではないため。
 func TestResolve_環境変数のAPIKeyはgit検査の対象外(t *testing.T) {
 	dir := t.TempDir()
@@ -237,6 +291,17 @@ func TestResolve_環境変数のAPIKeyはgit検査の対象外(t *testing.T) {
 	}
 	if res.APIKey != "from-env" {
 		t.Errorf("APIKey = %q", res.APIKey)
+	}
+}
+
+// ${env:VAR} は設定ファイルに書くための記法。環境変数の値に適用すると、
+// 利用者が書いていない redash.api_key を指すエラーが返ることになる。
+func TestResolve_環境変数のAPIKeyは展開しない(t *testing.T) {
+	res := mustResolve(t, layerFiles{
+		environ: []string{EnvAPIKey + `=abc${env:NOPE}`},
+	})
+	if want := `abc${env:NOPE}`; res.APIKey != want {
+		t.Errorf("APIKey = %q, want %q", res.APIKey, want)
 	}
 }
 

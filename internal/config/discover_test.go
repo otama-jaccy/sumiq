@@ -179,6 +179,41 @@ func TestDiscover_共有とローカルは別階層でもよい(t *testing.T) {
 	}
 }
 
+// git リポジトリの外では遡らない。上限が無いまま遡ると、ホームディレクトリに
+// 置き忘れた sumiq.local.yaml のような無関係なファイルを黙って読んでしまう。
+// それは api_key_command の実行まで含む。
+func TestDiscover_gitリポジトリの外では遡らない(t *testing.T) {
+	outer := t.TempDir() // .git を作らない
+	writeFile(t, outer, SharedFileName, "version: 1\n")
+	writeFile(t, outer, LocalFileName, "version: 1\n")
+	deep := filepath.Join(outer, "a", "b")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := discover(testOptions(deep))
+	if err != nil {
+		t.Fatalf("discover() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("discover() = %+v, want 空（リポジトリ外では遡らない）", got)
+	}
+}
+
+// リポジトリの外でも、カレントディレクトリのファイルは読む。
+func TestDiscover_gitリポジトリの外でもカレントは見る(t *testing.T) {
+	dir := t.TempDir() // .git を作らない
+	sharedPath := writeFile(t, dir, SharedFileName, "version: 1\n")
+
+	got, err := discover(testOptions(dir))
+	if err != nil {
+		t.Fatalf("discover() error = %v", err)
+	}
+	if len(got) != 1 || got[0].path != sharedPath {
+		t.Errorf("discover() = %+v, want %s", got, sharedPath)
+	}
+}
+
 // ディレクトリを設定ファイルと取り違えない。
 func TestDiscover_同名のディレクトリは無視する(t *testing.T) {
 	root := t.TempDir()

@@ -152,6 +152,10 @@ func TestEnvConfig_エラー(t *testing.T) {
 		{name: "duration が負", environ: []string{"SUMIQ_REDASH_POLL_INTERVAL=-1s"}, wantMsg: "負の値"},
 		{name: "bool が不正", environ: []string{"SUMIQ_QUERY_AUTO_LIMIT=yes-please"}, wantMsg: "true / false"},
 		{name: "整数が不正", environ: []string{"SUMIQ_QUERY_MAX_ROWS=いっぱい"}, wantMsg: "整数で指定してください"},
+		// 0 は「未指定」と同じ扱いになって既定の 1000 に落ちるため、設定した
+		// つもりの利用者に黙って別の値を使わせることになる。
+		{name: "max_rows が 0", environ: []string{"SUMIQ_QUERY_MAX_ROWS=0"}, wantMsg: "1 以上で指定してください"},
+		{name: "max_rows が負", environ: []string{"SUMIQ_QUERY_MAX_ROWS=-1"}, wantMsg: "1 以上で指定してください"},
 		{name: "on_exceed が不正", environ: []string{"SUMIQ_QUERY_ON_EXCEED=warn"}, wantMsg: `不正な値 "warn"`},
 		{name: "default_action が不正", environ: []string{"SUMIQ_MASKING_DEFAULT_ACTION=hash"}, wantMsg: `不正な値 "hash"`},
 		{name: "format が不正", environ: []string{"SUMIQ_OUTPUT_FORMAT=yaml"}, wantMsg: `不正な値 "yaml"`},

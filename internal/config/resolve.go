@@ -120,6 +120,12 @@ func Resolve(opts Options) (*Resolved, error) {
 		return nil, err
 	}
 
+	// 検査は解決より先。負けたレイヤの api_key も対象なので、
+	// 「使われる値かどうか」を待つ理由が無い。
+	if err := checkAPIKeyFiles(res.apiKeyFiles, opts); err != nil {
+		return nil, err
+	}
+
 	key, err := res.keySource.resolve(opts)
 	if err != nil {
 		return nil, err
