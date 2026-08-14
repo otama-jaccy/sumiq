@@ -120,9 +120,13 @@ func merge(layers []layered) (*Resolved, error) {
 		}
 	}
 
-	// データソースの default_action はグローバル既定と突き合わせて初めて
-	// 緩いかどうかが決まる。全レイヤを畳んだ後でなければ判定できない。
+	// データソースの検証は全レイヤを畳んだ後でなければできない。
+	// グローバル既定との比較も、レビュー済み定義との突き合わせも、
+	// 全部が出揃って初めて判定できる。
 	if err := res.checkDataSourceActions(); err != nil {
+		return nil, err
+	}
+	if err := res.checkDataSourceIDs(); err != nil {
 		return nil, err
 	}
 	res.Config.Version = SchemaVersion
@@ -253,6 +257,39 @@ func (r *Resolved) checkDataSourceActions() error {
 			return fmt.Errorf("%s で定義された data_sources (%s): default_action: %q は"+
 				"グローバル既定 %q より緩いため指定できません",
 				layer.String(), ds.Name, ds.DefaultAction, global)
+		}
+	}
+	return nil
+}
+
+// checkDataSourceIDs はレビューされないデータソースが、レビュー済みの
+// データソースと同じ id を指していないことを確かめる。
+//
+// 名前の差し替えは mergeDataSources が止めるが、それだけでは
+// 「別名で同じ id を指す」経路が残る。共有設定が analytics (id: 3) を
+// default_action: redact に上げていても、ローカルから prod (id: 3) を足せば、
+// グローバル既定のまま同じ接続先を引ける。analytics に紐づけたルールも
+// 名前で照合するため効かない。
+//
+// マスクの強さは、データソースに付けた名前ではなく接続先で決まるべきもの。
+// 別名を許すのは差し替えを許すのと同じ弱化になる。
+func (r *Resolved) checkDataSourceIDs() error {
+	reviewed := make(map[int]string)
+	for _, ds := range r.Config.DataSources {
+		if r.dataSourceLayers[ds.Name].Reviewed() {
+			reviewed[ds.ID] = ds.Name
+		}
+	}
+	for _, ds := range r.Config.DataSources {
+		layer := r.dataSourceLayers[ds.Name]
+		if layer.Reviewed() {
+			continue
+		}
+		if name, ok := reviewed[ds.ID]; ok {
+			return fmt.Errorf("%s で定義された data_sources (%s): id: %d は共有設定の %s と同じです。"+
+				"レビューされない設定から、レビュー済みのデータソースに別名を付けることはできません。"+
+				"マスク方針は名前ではなく接続先に紐づくため、%s をそのまま使ってください",
+				layer.String(), ds.Name, ds.ID, name, name)
 		}
 	}
 	return nil

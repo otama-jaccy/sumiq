@@ -22,7 +22,7 @@ type discovered struct {
 //
 // 存在しないファイルは結果に含めない。「ファイルが無い」ことはエラーではない。
 // ただし --config で明示指定されたファイルだけは、利用者が名前を挙げている以上
-// 存在しなければエラーにする（呼び出し元の loadLayers が open で落とす）。
+// 存在確認をせずに返し、Resolve の LoadFile で落とす。
 func discover(opts Options) ([]discovered, error) {
 	if opts.ConfigPath != "" {
 		// --config 指定時は 2〜4 の探索をスキップする。

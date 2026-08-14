@@ -232,6 +232,8 @@ func TestLoad_Errors(t *testing.T) {
 		{name: "データソースに name がない", yaml: "version: 1\ndata_sources: [{id: 1}]\n", wantMsg: "name が指定されていません"},
 		{name: "データソースに id がない", yaml: "version: 1\ndata_sources: [{name: a}]\n", wantMsg: "id は 1 以上"},
 		{name: "patterns が空", yaml: "version: 1\nmasking:\n  rules:\n    - patterns: []\n      method: redact\n", wantMsg: "patterns が空です"},
+		// 0 は未指定と区別できないので弾けないが、負の値は書き間違い以外にない。
+		{name: "max_rows が負", yaml: "version: 1\nquery: {max_rows: -1}\n", wantMsg: "負の値は指定できません"},
 		{name: "method がない", yaml: "version: 1\nmasking:\n  rules:\n    - patterns: [a]\n", wantMsg: "method が指定されていません"},
 
 		// その他

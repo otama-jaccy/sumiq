@@ -508,6 +508,56 @@ func TestResolve_ローカルデータソースのDefaultAction(t *testing.T) {
 	}
 }
 
+// マスクの強さはデータソースに付けた名前ではなく接続先（id）に紐づく。
+// 別名を許すと、名前で照合するルールも default_action も全部すり抜ける。
+func TestResolve_データソースの別名(t *testing.T) {
+	tests := []struct {
+		name    string
+		files   layerFiles
+		wantErr string
+	}{
+		{
+			name: "レビュー済みの id にローカルから別名を付けるのはエラー",
+			files: layerFiles{
+				shared: "version: 1\ndata_sources: [{name: analytics, id: 3, default_action: redact}]\n",
+				local:  "version: 1\ndata_sources: [{name: prod, id: 3}]\n",
+			},
+			wantErr: "別名を付けることはできません",
+		},
+		{
+			name: "ユーザ設定からの別名もエラー",
+			files: layerFiles{
+				shared: "version: 1\ndata_sources: [{name: analytics, id: 3}]\n",
+				user:   "version: 1\ndata_sources: [{name: prod, id: 3}]\n",
+			},
+			wantErr: "別名を付けることはできません",
+		},
+		{
+			// 共有ファイル内での別名は許す。レビューされている以上、
+			// データソースごとに別のマスク方針を当てる意図的な使い方でありうる。
+			name:  "共有ファイル内での別名は許す",
+			files: layerFiles{shared: "version: 1\ndata_sources: [{name: a, id: 3}, {name: b, id: 3}]\n"},
+		},
+		{
+			name: "id が違えばローカルからの追加は通る",
+			files: layerFiles{
+				shared: "version: 1\ndata_sources: [{name: analytics, id: 3}]\n",
+				local:  "version: 1\ndata_sources: [{name: sandbox, id: 99}]\n",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wantErr != "" {
+				wantError(t, tt.files, tt.wantErr)
+				return
+			}
+			mustResolve(t, tt.files)
+		})
+	}
+}
+
 // ADR-0003 §7 の要求そのもの。マスクは安全装置であり、レビューされない
 // レイヤから弱められる経路が1つでもあれば設計が破れている。
 //
@@ -562,6 +612,13 @@ masking:
 			name:    "共有のデータソースをローカルで差し替える",
 			files:   layerFiles{shared: shared + "data_sources: [{name: analytics, id: 3}]\n", local: "version: 1\ndata_sources: [{name: analytics, id: 99}]\n"},
 			wantErr: "差し替えることはできません",
+		},
+		{
+			// 名前の差し替えを止めても、別名で同じ id を指す経路が残っていた。
+			// マスクの強さは名前ではなく接続先に紐づくべきもの。
+			name:    "共有のデータソースにローカルから別名を付ける",
+			files:   layerFiles{shared: shared + "data_sources: [{name: analytics, id: 3, default_action: redact}]\n", local: "version: 1\ndata_sources: [{name: prod, id: 3}]\n"},
+			wantErr: "別名を付けることはできません",
 		},
 		{
 			// これはエラーにならない。ルールが上書きされず和集合になることで、
