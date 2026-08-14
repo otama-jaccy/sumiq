@@ -1,6 +1,8 @@
 package redash
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +100,10 @@ func TestResolve(t *testing.T) {
 		{endpoint: "https://redash.example.com/", want: "https://redash.example.com/api/jobs/job-1"},
 		{endpoint: "https://example.com/redash", want: "https://example.com/redash/api/jobs/job-1"},
 		{endpoint: "https://example.com/redash/", want: "https://example.com/redash/api/jobs/job-1"},
+		// パスのエスケープを保つ。%2F を本物の区切りに戻すと、
+		// 別のパスへリクエストを投げることになる。
+		{endpoint: "https://example.com/re%2Fdash", want: "https://example.com/re%2Fdash/api/jobs/job-1"},
+		{endpoint: "https://example.com/a%20b", want: "https://example.com/a%20b/api/jobs/job-1"},
 	}
 
 	for _, tt := range tests {
@@ -164,6 +170,24 @@ func TestScrub(t *testing.T) {
 	empty := &Client{}
 	if got := empty.scrub("abc"); got != "abc" {
 		t.Errorf("KEY 未設定で書き換えが起きました: %q", got)
+	}
+}
+
+// TestTimeoutErrorUnwrap は締切超過を errors.Is で拾えることを見る。
+//
+// 終了コードを分けたい internal/cli が型アサーションを強いられないようにする。
+func TestTimeoutErrorUnwrap(t *testing.T) {
+	err := error(&TimeoutError{Phase: PhaseWait, JobID: "job-1", Timeout: time.Minute})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Error("errors.Is(err, context.DeadlineExceeded) が false です")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Error("キャンセルとして拾われています")
+	}
+
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) || timeoutErr.Phase != PhaseWait {
+		t.Error("errors.As で段を取り出せません")
 	}
 }
 
