@@ -1,0 +1,53 @@
+# sumiq.local.yaml — ローカル設定のサンプル。
+#
+# このファイルは絶対にコミットしない（.gitignore に sumiq.local.yaml が
+# 登録済み。README.md「sumiq.local.yaml を .gitignore に入れる」節を参照）。
+# git 管理下のファイルに redash.api_key / api_key_command を書くと、
+# sumiq はロード時にエラーで停止する。書けないのではなく、書いても
+# 起動できない構造になっている。
+#
+# 使い方:
+#   cp sumiq.local.yaml.example sumiq.local.yaml
+# としてから、自分の環境に合わせて書き換える。
+
+version: 1
+
+redash:
+  # --- API KEY の取得方法は3つ。redash.api_key と redash.api_key_command は
+  #     同時には指定できない（両方書くとエラーになる）。いずれか1つを選ぶこと。
+
+  # 方法1: 環境変数 SUMIQ_REDASH_API_KEY を直接使う（このファイルには何も書かない）。
+  #   export SUMIQ_REDASH_API_KEY=xxxxxxxx
+  # CI やワンショット実行に向く。最も設定が単純。
+
+  # 方法2: このファイルに ${env:VAR} 参照を書く（下の行のコメントを外して使う）。
+  #   direnv 等でプロジェクトごとに環境変数を分けたい場合に使う。
+  #   ${env:...} 以外の書き方（$VAR 等）は展開されない。
+  # api_key: ${env:REDASH_API_KEY}
+
+  # 方法3: 外部コマンドの標準出力を API KEY として使う（下の行のコメントを外して使う）。
+  #   1Password CLI や macOS Keychain 等のシークレットマネージャから取得する場合に使う。
+  #   30秒以内に標準出力へ1行で返すコマンドであること。対話的な認証を挟むコマンド
+  #   （ブラウザでの承認待ち等）は打ち切られて失敗する。
+  # api_key_command: ["op", "read", "op://Private/redash/credential"]
+
+  # 方法1（環境変数のみ）を使う場合、この Redash セクション自体を丸ごと省略してよい。
+
+# ローカルにだけ定義するデータソース（共有設定に無いものを追加できる）。
+# 追加は許可されるが、実行のたびに
+#   "Warning: my-sandbox はローカル定義です。マスク方針はレビューされていません。"
+# のような警告が出る。共有設定のマスクルールは必ず適用されるが、
+# default_action をローカル側でグローバルより緩くすることはできない。
+data_sources:
+  - name: my-sandbox
+    id: 99
+
+masking:
+  rules:
+    # ローカルはマスクルールの「追加」のみできる。共有ルールの削除・弱化はできない
+    # （最終的な適用は全レイヤの和集合、同じ列に複数マッチしたら最も強い方法が勝つ）。
+    # method: none（明示的な許可）はここには書けない。allowlist の弱化になるため
+    # 共有ファイル（sumiq.yaml）にのみ書ける。
+    - patterns: ["internal_memo"]
+      method: redact
+      note: "自分の手元データにのみ存在する列。チーム設定には無いので個別に追加"
