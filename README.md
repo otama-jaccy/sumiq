@@ -74,9 +74,12 @@ Rows: 342
 6. コマンドライン引数
 ```
 
-3・4 はカレントディレクトリから git リポジトリのルートまで遡って探索するため、
-サブディレクトリから実行しても読まれる。`--config` を明示した場合はこの探索
-（2〜4）をまとめてスキップする。詳細は [ADR-0003](docs/adr/0003-config-file-design.md) を参照。
+3・4 はカレントディレクトリから git リポジトリのルートまで遡って探索し、
+**見つかった全ファイルを重ねる**（最も近い1枚だけが有効になるのではない）。
+モノレポでルートと `packages/etl/` の両方に `sumiq.yaml` があれば両方が読まれ、
+マスクルールは和集合になる。`--config` を明示した場合はこの探索（2〜4）を
+まとめてスキップする。詳細は [ADR-0003](docs/adr/0003-config-file-design.md)、
+探索・マージの実装判断は [ADR-0007](docs/adr/0007-layered-merge-guards.md) を参照。
 
 `sumiq.yaml.example` / `sumiq.local.yaml.example` をコピーして使い始める
 （クイックスタート参照）。
@@ -98,6 +101,11 @@ Rows: 342
 `redash.api_key` / `redash.api_key_command` を **git の管理下にあるファイル**
 （典型的には `sumiq.yaml`）に書くと、`sumiq` はロード時にエラーで起動を拒否する。
 「書かないでください」という規約ではなく、構造で防ぐ。
+
+**この検査は `git ls-files` でファイルが git の管理下にあるかを見るため、
+`git add` する前の新規ファイルは対象外になる。** `sumiq.yaml` を新規に作って
+その場で API KEY を書いて試す、という手順ではこの検査に守られない。
+共有ファイルには最初から API KEY を書かない運用を徹底すること。
 
 API KEY の取得元は3経路。詳細は `sumiq.local.yaml.example` を参照。
 
@@ -122,6 +130,8 @@ API KEY の取得元は3経路。詳細は `sumiq.local.yaml.example` を参照�
 - **`method: none`（明示的な許可）は共有ファイル（`sumiq.yaml`）にのみ書ける。**
   allowlist 運用（`default_action: redact`）で特定の列だけを通すための指定であり、
   ローカルから書けると弱化そのものになるため
+- ルールに `data_sources: [名前, ...]` を書くと、そのルールは指定したデータソースに
+  のみ追加適用される（省略すると全データソースに適用される）
 
 マージ規則の詳細（強度順序・厳格化のみ許可される項目 等）は
 [ADR-0003](docs/adr/0003-config-file-design.md) §7、強度順序に `null` を加えた
@@ -176,8 +186,14 @@ salt にする予定はない（低カーディナリティ値の総当たり復
 | `null` | `NULL` | `null` | 空フィールド |
 | `drop` | 列を表示しない | キーを含めない | ヘッダからも除く |
 
-マスクされた列の値は常に文字列として出力される（元の型は保持しない）。
-マスクされていない列は元の型を保つ。
+`redact` / `partial` / `hash` でマスクされた列の値は常に文字列として出力される
+（元の型は保持しない）。**`null` は例外で、json では文字列 `"null"` ではなく
+JSON の `null` そのものになる。** マスクされていない列は元の型を保つ。
+
+**`method: null` は YAML の引用符なし `null` と衝突するため、設定ファイルには
+`method: "null"` と引用符付きで書くこと。** 引用符を忘れると空値として読まれ、
+「method が指定されていません」という分かりにくいエラーになる。詳細は
+[ADR-0006](docs/adr/0006-mask-method-null-quoting.md) を参照。
 
 ### `csv` は `null` と空文字列を区別できない
 
@@ -190,6 +206,8 @@ CSV 形式の制約であり、`sumiq` 側では回避しない。値が `NULL` 
 
 - [ADR-0003: 設定ファイルの設計](docs/adr/0003-config-file-design.md)
 - [ADR-0004: 出力形式](docs/adr/0004-output-formats.md)
+- [ADR-0006: マスク方法 `null` は引用符付きで書く](docs/adr/0006-mask-method-null-quoting.md)
+- [ADR-0007: レイヤードマージの安全ガード](docs/adr/0007-layered-merge-guards.md)
 - [ADR-0009: マスク方法 `null` の強度](docs/adr/0009-mask-null-strength.md)
 - [ADR-0010: 列名パターンの方言](docs/adr/0010-mask-pattern-dialect.md)
 - [ADR-0011: `partial` の `keep` の仕様](docs/adr/0011-partial-keep-options.md)
