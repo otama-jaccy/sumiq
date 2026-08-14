@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/otama-jaccy/sumiq/internal/config"
 )
@@ -167,13 +168,38 @@ func (e *Engine) hash(s string) string {
 // applyPartial は残す範囲だけを残して伏せる。
 func applyPartial(s string, spec partialSpec) string {
 	if spec.domain {
-		// メールアドレスの @ より後ろを残す。@ が無ければドメインは残さない。
-		// 「ドメインらしき部分」を推測すると、推測が外れた分だけ値が出る。
-		if at := strings.LastIndex(s, "@"); at >= 0 {
+		// メールアドレスの @ より後ろを残す。
+		//
+		// @ の後ろがホスト名の形をしていなければ残さない。列がメール
+		// アドレスだけを持つとは限らず、*mail* のようなパターンは
+		// 自由記述の列にも掛かる。「送付先は bob@example.com、案件は …」
+		// のような値で @ 以降をそのまま残すと、本文が丸ごと出る。
+		if at := strings.LastIndex(s, "@"); at >= 0 && hostnameLike(s[at+1:]) {
 			return keepEnds(s[:at], spec.prefix, spec.suffix) + s[at:]
 		}
 	}
 	return keepEnds(s, spec.prefix, spec.suffix)
+}
+
+// hostnameLike はホスト名として書ける並びだけからできているかを返す。
+//
+// 判定は緩い（ラベルの長さも TLD の実在も見ない）が、残す側の条件として
+// 使うため、迷ったら false に倒す向きに効く。空白や句読点が1つでも
+// 混ざれば残さない。非 ASCII を弾かないのは国際化ドメイン名のため。
+func hostnameLike(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if unicode.IsLetter(c) || unicode.IsDigit(c) {
+			continue
+		}
+		if c == '.' || c == '-' || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // keepEnds は先頭 prefix 文字と末尾 suffix 文字を残し、間を伏せる。
@@ -185,7 +211,9 @@ func keepEnds(s string, prefix, suffix int) string {
 		return redacted
 	}
 	rs := []rune(s)
-	if prefix+suffix >= len(rs) {
+	// 片方ずつ先に比べる。keep_prefix に極端な値を書かれると
+	// prefix + suffix が桁溢れして負になり、この検査をすり抜ける。
+	if prefix >= len(rs) || suffix >= len(rs) || prefix+suffix >= len(rs) {
 		return redacted
 	}
 	return string(rs[:prefix]) + redacted + string(rs[len(rs)-suffix:])

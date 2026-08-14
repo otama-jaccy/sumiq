@@ -307,6 +307,46 @@ func TestDataSourceScope(t *testing.T) {
 	}
 }
 
+// TestOtherDataSourceRuleIsValidated は、いま引かないデータソース向けの
+// ルールも検証されることを見る。
+//
+// スコープで先に絞ると、書き間違いがそのデータソースを引く日まで
+// 見つからない。負けたレイヤの設定も検査対象にするのと同じ理由。
+func TestOtherDataSourceRuleIsValidated(t *testing.T) {
+	tests := []struct {
+		name string
+		rule config.MaskRule
+	}{
+		{
+			name: "グロブで扱わない [",
+			rule: config.MaskRule{Patterns: []string{"user[0-9]"}, Method: config.MaskRedact},
+		},
+		{
+			name: "patterns が空",
+			rule: config.MaskRule{Method: config.MaskRedact},
+		},
+		{
+			name: "keep 系が無い partial",
+			rule: config.MaskRule{Patterns: []string{"memo"}, Method: config.MaskPartial},
+		},
+		{
+			name: "未知の method",
+			rule: config.MaskRule{Patterns: []string{"memo"}, Method: config.MaskMethod("obfuscate")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := tt.rule
+			r.DataSources = []string{"prod"}
+			_, err := New(masking(r), config.DataSource{Name: "analytics", ID: 1})
+			if err == nil {
+				t.Fatal("別のデータソース向けのルールの誤りが素通りしました")
+			}
+		})
+	}
+}
+
 // TestApplyMasksNullValues は NULL の値もマスクされることを見る。
 //
 // 値を見て分岐すると、その列で NULL だった行だけ出力が変わり、
@@ -408,6 +448,30 @@ func TestNewRejects(t *testing.T) {
 			name:    "読めない正規表現",
 			masking: masking(rule(config.MaskRedact, "regex:(")),
 			want:    "正規表現",
+		},
+		{
+			name: "空のデータソース名",
+			masking: masking(config.MaskRule{
+				Patterns:    []string{"a"},
+				Method:      config.MaskRedact,
+				DataSources: []string{""},
+			}),
+			want: "data_sources[0]",
+		},
+		{
+			name:    "扱えないデータソース単位の default_action",
+			masking: masking(rule(config.MaskRedact, "a")),
+			ds:      config.DataSource{Name: testDataSource, ID: 1, DefaultAction: config.Action("mask")},
+			want:    "default_action",
+		},
+		{
+			// 厳しい方を先に選ぶと、緩い方が読めない値でも通ってしまう。
+			name: "データソース単位が redact でもグローバルの未解決は落とす",
+			masking: config.Masking{
+				Rules: []config.MaskRule{rule(config.MaskRedact, "a")},
+			},
+			ds:   config.DataSource{Name: testDataSource, ID: 1, DefaultAction: config.ActionRedact},
+			want: "masking.default_action",
 		},
 	}
 

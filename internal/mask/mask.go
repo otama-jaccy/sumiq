@@ -30,6 +30,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/otama-jaccy/sumiq/internal/config"
 	"github.com/otama-jaccy/sumiq/internal/redash"
@@ -57,7 +58,7 @@ type Engine struct {
 // Engine はデータソースを固定して作るため、ここに残るのは対象の
 // データソースに効くルールだけ。data_sources の絞り込みは New で済ませる。
 type compiledRule struct {
-	matchers []*matcher
+	matchers []*regexp.Regexp
 	mask     columnMask
 }
 
@@ -95,11 +96,14 @@ func New(m config.Masking, ds config.DataSource) (*Engine, error) {
 	}
 
 	for i, r := range m.Rules {
-		cr, ok, err := compileRule(r, ds.Name)
+		// 検査は「そのルールが今回使われるか」と切り離して走らせる。
+		// 先にスコープで絞ると、別のデータソース向けのルールの書き間違いが、
+		// そのデータソースを引く日まで見つからない。
+		cr, err := compileRule(r)
 		if err != nil {
 			return nil, fmt.Errorf("masking.rules[%d] %v: %w", i, r.Patterns, err)
 		}
-		if !ok {
+		if !scopedTo(r.DataSources, ds.Name) {
 			continue // 他のデータソース向けのルール。
 		}
 		e.rules = append(e.rules, cr)
@@ -113,20 +117,39 @@ func New(m config.Masking, ds config.DataSource) (*Engine, error) {
 // （ADR-0003 §7）。緩い指定はエラーにせず、単に効かない。ここで落とすと、
 // レビュー済みの共有ファイルにしか書けない組み合わせ（config 側は共有ファイルの
 // 引き下げを通す）で実行そのものができなくなる。
+//
+// 両方を検証してから比べる。厳しい方を先に選ぶと、緩い方が読めない値でも
+// 通ってしまい、「解決されていない設定」の検出が入力の半分でしか効かなくなる。
 func fallbackMethod(global, perDataSource config.Action) (config.MaskMethod, error) {
-	action := global
-	if strictness(perDataSource) > strictness(action) {
-		action = perDataSource
+	method, err := actionMethod(global)
+	if err != nil {
+		return "", fmt.Errorf("masking.default_action: %w", err)
 	}
-	switch action {
+	if perDataSource == "" {
+		return method, nil
+	}
+	perMethod, err := actionMethod(perDataSource)
+	if err != nil {
+		return "", fmt.Errorf("data_sources の default_action: %w", err)
+	}
+	if strictness(perDataSource) > strictness(global) {
+		return perMethod, nil
+	}
+	return method, nil
+}
+
+// actionMethod は default_action を、マッチしなかった列に適用する方法に直す。
+//
+// 空になるのは default_action が解決されていないとき。既定を補って続けると
+// allowlist 運用が黙って denylist に落ちる。
+func actionMethod(a config.Action) (config.MaskMethod, error) {
+	switch a {
 	case config.ActionNone:
 		return config.MaskNone, nil
 	case config.ActionRedact:
 		return config.MaskRedact, nil
 	}
-	// 空になるのは masking.default_action が解決されていないとき。
-	// 既定を補って続けると allowlist 運用が黙って denylist に落ちる。
-	return "", fmt.Errorf("masking.default_action が解決されていません: %q", action)
+	return "", fmt.Errorf("解決されていないか、扱えない値です: %q", a)
 }
 
 // strictness は Action の厳しさを返す。大きいほど厳しい。未指定は最も緩い。
@@ -138,31 +161,33 @@ func strictness(a config.Action) int {
 }
 
 // compileRule はルール1件を照合器まで組み立てる。
-// 対象のデータソースに効かないルールは ok=false で返る。
-func compileRule(r config.MaskRule, dataSource string) (compiledRule, bool, error) {
-	if !scopedTo(r.DataSources, dataSource) {
-		return compiledRule{}, false, nil
-	}
+func compileRule(r config.MaskRule) (compiledRule, error) {
 	if len(r.Patterns) == 0 {
-		return compiledRule{}, false, errors.New("patterns が空です")
+		return compiledRule{}, errors.New("patterns が空です")
 	}
 	spec, err := partialSpecOf(r)
 	if err != nil {
-		return compiledRule{}, false, err
+		return compiledRule{}, err
 	}
 	if !knownMethod(r.Method) {
-		return compiledRule{}, false, fmt.Errorf("method: %q は扱えません", r.Method)
+		return compiledRule{}, fmt.Errorf("method: %q は扱えません", r.Method)
+	}
+	for i, name := range r.DataSources {
+		// 空の名前はどのデータソースにも一致せず、ルールを丸ごと無効にする。
+		if name == "" {
+			return compiledRule{}, fmt.Errorf("data_sources[%d] が空です", i)
+		}
 	}
 
 	cr := compiledRule{mask: columnMask{method: r.Method, partial: spec}}
 	for _, p := range r.Patterns {
 		m, err := compilePattern(p)
 		if err != nil {
-			return compiledRule{}, false, err
+			return compiledRule{}, err
 		}
 		cr.matchers = append(cr.matchers, m)
 	}
-	return cr, true, nil
+	return cr, nil
 }
 
 // scopedTo は data_sources の指定がこのデータソースに掛かるかを返す。
@@ -182,7 +207,7 @@ func scopedTo(scope []string, dataSource string) bool {
 // matches は列名にマッチするパターンがあるかを返す。
 func (r compiledRule) matches(column string) bool {
 	for _, m := range r.matchers {
-		if m.matches(column) {
+		if m.MatchString(column) {
 			return true
 		}
 	}

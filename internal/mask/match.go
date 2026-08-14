@@ -9,17 +9,6 @@ import (
 // regexPrefix は patterns を正規表現として読む接頭辞（ADR-0003 §3）。
 const regexPrefix = "regex:"
 
-// matcher は列名に照合するパターン1つ。
-type matcher struct {
-	// src は元の記述。エラー文に出す。
-	src string
-	re  *regexp.Regexp
-}
-
-func (m *matcher) matches(column string) bool {
-	return m.re.MatchString(column)
-}
-
 // compilePattern はパターン1つを照合器にする。
 //
 // 大文字小文字はグロブでも正規表現でも無視する。ADR-0003 §3 がグロブについて
@@ -29,7 +18,7 @@ func (m *matcher) matches(column string) bool {
 //
 // 組み立てられないパターンはエラーにする。マッチしないパターンとして
 // 読み飛ばすと、そのルールが消えたまま実行される。
-func compilePattern(p string) (*matcher, error) {
+func compilePattern(p string) (*regexp.Regexp, error) {
 	if p == "" {
 		return nil, fmt.Errorf("空のパターンは書けません")
 	}
@@ -42,7 +31,7 @@ func compilePattern(p string) (*matcher, error) {
 		if err != nil {
 			return nil, fmt.Errorf("パターン %q: 正規表現として読めません: %w", p, err)
 		}
-		return &matcher{src: p, re: re}, nil
+		return re, nil
 	}
 
 	expr, err := globToRegexp(p)
@@ -53,7 +42,7 @@ func compilePattern(p string) (*matcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("パターン %q: グロブを解釈できません: %w", p, err)
 	}
-	return &matcher{src: p, re: re}, nil
+	return re, nil
 }
 
 // globToRegexp はグロブを正規表現に直す。

@@ -58,7 +58,7 @@ func TestPatternMatch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compilePattern(%q): %v", tt.pattern, err)
 			}
-			if got := m.matches(tt.column); got != tt.want {
+			if got := m.MatchString(tt.column); got != tt.want {
 				t.Errorf("%q が %q にマッチ = %v, want %v", tt.pattern, tt.column, got, tt.want)
 			}
 		})
