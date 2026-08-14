@@ -178,7 +178,7 @@ Go の `http.Client` は既定でリダイレクトを追うが、これは2つ�
 
 ## 未決事項
 
-- ポーリング中の一時的な失敗をどう扱うか → [#15](https://github.com/otama-jaccy/sumiq/issues/15)
+- ~~ポーリング中の一時的な失敗をどう扱うか~~ → [ADR-0012](./0012-poll-transient-retry.md) で決定
 - 結果のサイズ上限と streaming の要否 → [#16](https://github.com/otama-jaccy/sumiq/issues/16)
 - 中断時に `DELETE /api/jobs/{id}` でジョブを止めるか（現状は止めない）
 
