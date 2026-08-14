@@ -1,0 +1,112 @@
+# sumiq.yaml — 共有設定のサンプル。
+#
+# このファイルは git にコミットする。API KEY のような秘密は書けない
+# （書くとロード時にエラーで停止する。README.md「API KEY」節を参照）。
+#
+# 使い方:
+#   cp sumiq.yaml.example sumiq.yaml
+# としてから、自分のチームの Redash / データソース / マスク方針に書き換える。
+#
+# マスクルールはこのファイル（共有設定）にのみ書き、レビューを通すこと。
+# sumiq.local.yaml から共有ルールを弱めることはできない（追加のみ許可）。
+# 詳細は docs/adr/0003-config-file-design.md を参照。
+
+version: 1
+
+redash:
+  endpoint: https://redash.example.com
+  # ジョブ完了を待つ上限。ポーリングは poll_interval 間隔で行う。
+  timeout: 300s
+  poll_interval: 1s
+  # api_key はここに書かない。sumiq.local.yaml か環境変数 SUMIQ_REDASH_API_KEY を使う。
+
+# sumiq query -d <name> の <name> で選べるデータソース。
+# CLI は名前のみ受け付け、数値 ID を直接指定することはできない。
+data_sources:
+  - name: analytics
+    id: 3
+    description: "本番リードレプリカ。個人情報を含むため allowlist 運用にする"
+    # default_action: redact にすると、下の masking.rules にマッチしなかった列も
+    # 一律 **** になる（allowlist 運用）。method: none を書いた列だけが素通しになる。
+    default_action: redact
+
+  - name: sandbox
+    id: 7
+    description: "検証用データソース。個人情報を含まない"
+    # このデータソースだけ auto_limit を切る例。
+    # Oracle / SQL Server では apply_auto_limit がクエリを壊すことがあるため、
+    # 該当するデータソースはここで個別に false にする（README.md「auto_limit」節を参照）。
+    auto_limit: false
+
+query:
+  # Redash に apply_auto_limit を渡すかどうか。効けばフルスキャン回避になる最適化だが、
+  # CTE を含むクエリや SQL 以外のデータソースでは黙って効かないことがある。
+  # 実際の防御線ではない。防御線は max_rows。
+  auto_limit: true
+  # 取得後にクライアント側で判定する安全装置。auto_limit と違い必ず効く。
+  max_rows: 1000
+  # max_rows を超えたときの挙動。error: 何も出力せず失敗する / truncate: max_rows 件で切り詰めて出力する。
+  # 既定は error。truncate は「1000 件で切られた結果を全件だと誤認する」事故につながるため、
+  # 必要な場合のみ明示的に選ぶこと。
+  on_exceed: error
+
+masking:
+  # このファイルにマッチしなかった列の既定の扱い。
+  # none: マッチした列だけマスクする（denylist）。redact: マッチしなかった列も **** にする（allowlist）。
+  # データソース単位で上書きできる（上の data_sources[].default_action）。
+  # ローカル設定からはここより緩い値に上書きできない。
+  default_action: none
+
+  rules:
+    # パターンは既定でグロブ（大文字小文字を無視、* は0文字以上の任意の並び、? は任意の1文字、
+    # / や改行もまたぐ）。標準の path.Match とは方言が異なり、[ を含むパターンはエラーになる
+    # （文字クラスとして読むか列名の文字として読むか曖昧なため）。列名の一部を選びたい場合は
+    # regex: 接頭辞で正規表現に切り替える。詳細は docs/adr/0010-mask-pattern-dialect.md を参照。
+
+    - patterns: ["*email*"]
+      method: partial
+      keep: domain
+      # なぜ隠すか: メールアドレスは個人特定情報だが、ドメインだけ残せば
+      # 流入元（社内ドメインか一般ユーザか）の切り分けに使える。
+      note: "ドメインのみ残す。流入元の切り分けに使うため"
+
+    - patterns: ["*phone*", "*tel"]
+      method: redact
+      # なぜ隠すか: 電話番号は個人特定情報。部分表示が必要な要求は今のところ無い。
+      note: "電話番号は全件個人特定情報のため一律redact"
+
+    - patterns: ["user_id", "customer_id"]
+      method: hash
+      # なぜ隠すか: ID そのものは分析に使う（同一ユーザの行を集計・JOINしたい）が、
+      # 生の ID を渡すと Redash 外の情報と突き合わせて個人を特定できてしまう。
+      # 実行ごとに salt がランダムなため、実行をまたいだ突き合わせはできない
+      # （README.md「hash の salt」節を参照）。
+      note: "同一実行内でのみ集計・JOINしたい。実行をまたいだ突き合わせは仕様上不可"
+
+    - patterns: ["regex:^(first|last)_name$"]
+      method: drop
+      # なぜ隠すか: 氏名は分析用途が無く、部分表示の需要も無い。列ごと消して
+      # 「取得したが空だった」という誤読も避ける。
+      note: "分析に使わないため列ごと出力しない"
+
+    - patterns: ["memo", "note"]
+      method: redact
+      # なぜ隠すか: 自由記述欄はカスタマーサポートの引用等で個人情報が
+      # 混入しやすく、内容を精査するコストに見合わない。analytics のみ対象。
+      note: "自由記述は個人情報混入のリスクが高いため一律redact（analyticsのみ）"
+      data_sources: [analytics]
+
+    # allowlist 運用（analytics の default_action: redact）で、集計に必要な列だけを
+    # 明示的に通す例。method: none は共有ファイルにのみ書ける
+    # （ローカルから書けると allowlist の弱化そのものになるため）。
+    # regex: は method: none には書けない（意図せず広い範囲を通してしまう事故を防ぐため）。
+    # 通したい列は1つずつグロブで挙げること。
+    - patterns: ["id", "created_at", "status"]
+      method: none
+      # なぜ隠すか（このルールは逆に「隠さない」指定）: 集計・可視化に必須で、
+      # 個人を特定できない列であるためレビュー済みで allowlist に加えている。
+      note: "集計に必須かつ個人を特定できない列。allowlistに追加済み"
+
+output:
+  # table / json / csv。CLI の --format で毎回上書きできる（優先順位は CLI 引数が最も強い）。
+  format: table
