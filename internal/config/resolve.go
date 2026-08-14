@@ -120,17 +120,13 @@ func Resolve(opts Options) (*Resolved, error) {
 		return nil, err
 	}
 
-	// 検査は解決より先。負けたレイヤの api_key も対象なので、
-	// 「使われる値かどうか」を待つ理由が無い。
-	if err := checkAPIKeyFiles(res.apiKeyFiles, opts); err != nil {
+	// git 管理下の検査は Resolve の時点で必ず走らせる。値そのものの解決とは違い、
+	// これは事故を止めるためのもので、その値が使われるかどうかとは無関係。
+	if err := checkAPIKeyFiles(res.apiKeySpecs, opts); err != nil {
 		return nil, err
 	}
 
-	key, err := res.keySource.resolve(opts)
-	if err != nil {
-		return nil, err
-	}
-	res.APIKey = key
+	res.opts = opts
 	return res, nil
 }
 
@@ -147,7 +143,11 @@ func (r *Resolved) Validate() error {
 	if r.Config.Redash.Endpoint == "" {
 		return fmt.Errorf("redash.endpoint が指定されていません。%s に書いてください", SharedFileName)
 	}
-	if r.APIKey == "" {
+	key, err := r.APIKey()
+	if err != nil {
+		return err
+	}
+	if key == "" {
 		return fmt.Errorf("Redash の API KEY がありません。環境変数 %s、%s の redash.api_key、"+
 			"redash.api_key_command のいずれかで渡してください", EnvAPIKey, LocalFileName)
 	}
