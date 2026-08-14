@@ -99,6 +99,8 @@ func (d *decoder) prepare(n *Node, out reflect.Value) (newout reflect.Value, unm
 
 ## 未決事項
 
+→ [ADR-0009](./0009-mask-null-strength.md) で決定した（`drop > redact > null > hash > partial > none`）。以下は決定前の記述。
+
 **ADR-0003 §7 の強度順序に `null` の位置がない。**
 
 ```
