@@ -61,30 +61,44 @@ func (s apiKeySource) resolve(opts Options) (string, error) {
 	if !s.set {
 		return "", nil
 	}
-
-	// git 管理下のファイルに書かれた api_key は、展開の有無にかかわらず拒む。
-	// ${env:VAR} なら実害は無いが、それを許すと「git に入っている api_key は
-	// 中身を読んで安全か判断する」ことがレビュアーの仕事になる。判断を挟まず
-	// 一律で落とす方が、規約より確実に事故を防ぐ。
-	//
-	// api_key_command は秘密そのものではなく秘密の取り方であり、コミットされて
-	// 構わない。ADR-0003 が共有ファイルに書けるものとして挙げているのはこちら。
-	if s.key != "" && s.path != "" {
-		tracked, err := opts.tracked(s.path)
-		if err != nil {
-			return "", err
-		}
-		if tracked {
-			return "", fmt.Errorf("%s は git の管理下にあります。redash.api_key をここに書くことはできません。"+
-				"%s に書くか、環境変数 %s か redash.api_key_command を使ってください",
-				s.path, LocalFileName, EnvAPIKey)
-		}
-	}
-
 	if s.key != "" {
+		// 環境変数から来た値は展開しない。${env:VAR} は設定ファイルに書くための
+		// 記法（ADR-0003 §5）であり、環境変数の値に適用すると、利用者が書いて
+		// いない redash.api_key を指すエラーが返ることになる。
+		if s.layer == LayerEnv {
+			return s.key, nil
+		}
 		return expandEnvRefs(s.key, opts.lookupEnv)
 	}
 	return runAPIKeyCommand(s.command, s.layer)
+}
+
+// checkAPIKeyFiles は api_key を書いたファイルが git の管理下にないことを確かめる。
+//
+// 検査するのは「勝ったレイヤ」ではなく api_key を書いた全ファイル。
+// 環境変数で API KEY を渡している人（ADR-0003 §5 の経路1。最も普通の使い方）は
+// ファイルの指定が負けるため、勝者だけを見ると、共有ファイルにコミットされた
+// api_key を素通しすることになる。この検査は事故を防ぐためのものなので、
+// 「その値が実際に使われるか」とは無関係に走らせる。
+//
+// api_key_command は検査しない。秘密そのものではなく秘密の取り方であり、
+// ADR-0003 が共有ファイルに書けるものとして挙げているのはこちら。
+func checkAPIKeyFiles(paths []string, opts Options) error {
+	for _, p := range paths {
+		tracked, err := opts.tracked(p)
+		if err != nil {
+			return err
+		}
+		if tracked {
+			// ${env:VAR} なら実害は無いが、それも落とす。許すと「git に入っている
+			// api_key は中身を読んで安全か判断する」ことがレビュアーの仕事になる。
+			// 判断を挟まず一律で落とす方が、規約より確実に事故を防ぐ。
+			return fmt.Errorf("%s は git の管理下にあります。redash.api_key をここに書くことはできません。"+
+				"%s に書くか、環境変数 %s か redash.api_key_command を使ってください",
+				p, LocalFileName, EnvAPIKey)
+		}
+	}
+	return nil
 }
 
 // runAPIKeyCommand は api_key_command を実行し、標準出力を API KEY として読む。
@@ -97,11 +111,13 @@ func runAPIKeyCommand(command []string, layer Layer) (string, error) {
 	cmd.Stderr = &stderr
 
 	out, err := cmd.Output()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("%s: redash.api_key_command が %s 以内に終わりませんでした: %v",
-			layer, apiKeyCommandTimeout, command)
-	}
 	if err != nil {
+		// 打ち切りの判定は失敗したときだけ。先に見ると、締切ぎりぎりで成功した
+		// コマンドの出力を捨ててタイムアウトとして報告してしまう。
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("%s: redash.api_key_command が %s 以内に終わりませんでした: %v",
+				layer, apiKeyCommandTimeout, command)
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			return "", fmt.Errorf("%s: redash.api_key_command が失敗しました: %v: %w", layer, command, err)

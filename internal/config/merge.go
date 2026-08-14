@@ -55,8 +55,10 @@ type Resolved struct {
 	APIKey string
 
 	// keySource は API KEY の指定がどのレイヤ・どのファイル由来かを保持する。
-	// git 管理下のファイル由来かを判定するためにパスが要る。
 	keySource apiKeySource
+	// apiKeyFiles は redash.api_key を書いた全ファイル。勝ち負けに関係なく
+	// git 管理下かを検査するため、負けたレイヤの分も残す。
+	apiKeyFiles []string
 
 	// dataSourceLayers はデータソース名 → 定義したレイヤ。
 	// ローカル定義のデータソースを使う実行で警告を出す（#7）ために保持する。
@@ -104,6 +106,9 @@ func merge(layers []layered) (*Resolved, error) {
 		mergeRedash(&res.Config.Redash, l.cfg.Redash)
 		if err := keySrc.absorb(l); err != nil {
 			return nil, err
+		}
+		if l.cfg.Redash.APIKey != "" && l.path != "" {
+			res.apiKeyFiles = append(res.apiKeyFiles, l.path)
 		}
 		mergeQuery(&res.Config.Query, l.cfg.Query)
 		mergeOutput(&res.Config.Output, l.cfg.Output)
@@ -189,20 +194,45 @@ func mergeMasking(dst *Masking, l layered) error {
 
 // mergeDataSources は名前をキーにデータソースを足す。
 //
-// ローカルからの追加は許可するが、既に定義済みの名前の再定義は許可しない。
-// ADR-0003 が認めているのは「追加」であって差し替えではなく、再定義を許すと
-// 共有設定でレビューされた default_action や id をローカルから置き換えられる。
+// 名前がぶつかったときの扱いは3通りに分かれる。
+//
+//   - 同じレイヤ内での重複はエラー。1枚のファイルに同じ名前が2回あるのは
+//     書き間違いであり、黙って後勝ちにすると片方が消えたまま動く
+//   - レビューされる設定（共有）が、レビューされない設定（ユーザ / ローカル）の
+//     定義を上書きするのは許す。これは ADR-0003 §2 の「下が勝つ」そのもので、
+//     禁じるとユーザ設定に名前を1つ置いただけでリポジトリ全体が動かなくなる
+//   - 逆向き、つまりレビューされない設定が共有設定の定義を差し替えるのはエラー。
+//     許すと、レビュー済みの id や default_action をローカルから置き換えられる
 func (r *Resolved) mergeDataSources(l layered) error {
 	for i, ds := range l.cfg.DataSources {
-		if prev, ok := r.dataSourceLayers[ds.Name]; ok {
+		prev, exists := r.dataSourceLayers[ds.Name]
+		switch {
+		case !exists:
+			// 新規の名前。
+		case prev == l.layer:
+			return fmt.Errorf("%s: data_sources[%d] (%s): 同じ名前が2回定義されています",
+				l.origin(), i, ds.Name)
+		case prev.Reviewed() && !l.layer.Reviewed():
 			return fmt.Errorf("%s: data_sources[%d] (%s): この名前は %s で定義済みです。"+
-				"データソースは追加のみできます。定義を変えたい場合は定義元を直してください",
+				"レビューされない設定から共有設定のデータソースを差し替えることはできません。"+
+				"別の名前で追加してください",
 				l.origin(), i, ds.Name, prev.String())
 		}
 		r.dataSourceLayers[ds.Name] = l.layer
-		r.Config.DataSources = append(r.Config.DataSources, ds)
+		r.setDataSource(ds)
 	}
 	return nil
+}
+
+// setDataSource は同じ名前があれば置き換え、無ければ末尾に足す。
+func (r *Resolved) setDataSource(ds DataSource) {
+	for i := range r.Config.DataSources {
+		if r.Config.DataSources[i].Name == ds.Name {
+			r.Config.DataSources[i] = ds
+			return
+		}
+	}
+	r.Config.DataSources = append(r.Config.DataSources, ds)
 }
 
 // checkDataSourceActions はレビューされないレイヤで定義されたデータソースが、

@@ -52,6 +52,12 @@ func envVars() []envVar {
 			if err != nil {
 				return fmt.Errorf("整数で指定してください: %q", v)
 			}
+			// 0 は「未指定」と同じ扱いになって既定の 1000 に落ちるため、
+			// 設定したつもりの利用者に黙って別の値を使わせることになる。
+			// 負の値は行数ガードを常に発火させる。どちらも受け付けない。
+			if n < 1 {
+				return fmt.Errorf("1 以上で指定してください: %q", v)
+			}
 			c.Query.MaxRows = n
 			return nil
 		}},

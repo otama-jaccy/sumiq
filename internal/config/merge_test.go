@@ -361,36 +361,74 @@ func TestResolve_データソースの由来を保持する(t *testing.T) {
 	}
 }
 
-// ローカルからの「追加」は許すが「差し替え」は許さない。
-// 差し替えを許すと、レビュー済みの id や default_action をローカルから置き換えられる。
-func TestResolve_データソースの再定義はエラー(t *testing.T) {
+// レビューされない設定から共有設定のデータソースを差し替えることはできない。
+// 許すと、レビュー済みの id や default_action をローカルから置き換えられる。
+func TestResolve_データソースの再定義(t *testing.T) {
 	tests := []struct {
-		name  string
-		files layerFiles
+		name    string
+		files   layerFiles
+		wantErr string
+		// wantID は再定義が通る場合の期待値。
+		wantID    int
+		wantLayer Layer
 	}{
 		{
-			name: "ローカルが共有の名前を再定義する",
+			name: "ローカルは共有の名前を差し替えられない",
 			files: layerFiles{
 				shared: "version: 1\ndata_sources: [{name: analytics, id: 3, default_action: redact}]\n",
 				local:  "version: 1\ndata_sources: [{name: analytics, id: 99}]\n",
 			},
+			wantErr: "差し替えることはできません",
 		},
 		{
-			name: "共有がユーザ設定の名前を再定義する",
+			name: "ユーザ設定も共有の名前を差し替えられない",
 			files: layerFiles{
-				user:   "version: 1\ndata_sources: [{name: analytics, id: 3}]\n",
-				shared: "version: 1\ndata_sources: [{name: analytics, id: 4}]\n",
+				user:   "version: 1\ndata_sources: [{name: analytics, id: 99}]\n",
+				shared: "version: 1\ndata_sources: [{name: other, id: 1}]\n",
+				local:  "version: 1\ndata_sources: [{name: other, id: 2}]\n",
 			},
+			wantErr: "差し替えることはできません",
 		},
 		{
-			name:  "同じファイル内での重複",
-			files: layerFiles{shared: "version: 1\ndata_sources: [{name: a, id: 1}, {name: a, id: 2}]\n"},
+			// 逆向きは通す。ADR-0003 §2 の「下が勝つ」そのもので、ここを
+			// エラーにすると、ユーザ設定に名前を1つ置いただけで、その名前を
+			// 使う全リポジトリが動かなくなる。
+			name: "共有はユーザ設定の名前を上書きできる",
+			files: layerFiles{
+				user:   "version: 1\ndata_sources: [{name: analytics, id: 99}]\n",
+				shared: "version: 1\ndata_sources: [{name: analytics, id: 3}]\n",
+			},
+			wantID:    3,
+			wantLayer: LayerShared,
+		},
+		{
+			name:    "同じファイル内での重複はエラー",
+			files:   layerFiles{shared: "version: 1\ndata_sources: [{name: a, id: 1}, {name: a, id: 2}]\n"},
+			wantErr: "同じ名前が2回定義されています",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			wantError(t, tt.files, "定義済みです")
+			if tt.wantErr != "" {
+				wantError(t, tt.files, tt.wantErr)
+				return
+			}
+			res := mustResolve(t, tt.files)
+			ds, layer, ok := res.DataSource("analytics")
+			if !ok {
+				t.Fatal("DataSource(analytics) が見つかりません")
+			}
+			if ds.ID != tt.wantID {
+				t.Errorf("id = %d, want %d", ds.ID, tt.wantID)
+			}
+			if layer != tt.wantLayer {
+				t.Errorf("layer = %v, want %v", layer, tt.wantLayer)
+			}
+			// 上書きであって追加ではないので、件数は増えない。
+			if n := len(res.Config.DataSources); n != 1 {
+				t.Errorf("data_sources = %d件, want 1件", n)
+			}
 		})
 	}
 }
@@ -523,7 +561,7 @@ masking:
 		{
 			name:    "共有のデータソースをローカルで差し替える",
 			files:   layerFiles{shared: shared + "data_sources: [{name: analytics, id: 3}]\n", local: "version: 1\ndata_sources: [{name: analytics, id: 99}]\n"},
-			wantErr: "定義済みです",
+			wantErr: "差し替えることはできません",
 		},
 		{
 			// これはエラーにならない。ルールが上書きされず和集合になることで、

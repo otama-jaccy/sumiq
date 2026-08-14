@@ -51,37 +51,56 @@ func discover(opts Options) ([]discovered, error) {
 		return nil, fmt.Errorf("%s: 絶対パスに解決できません: %w", dir, err)
 	}
 
+	// 遡る上限は先に確定させる。探索しながら git root を判定すると、
+	// git root が無い場合にファイルシステムの root まで遡ってしまう。
+	root, inRepo := gitRoot(dir)
+
 	// 共有とローカルは別々に遡る。片方だけがリポジトリルートに置かれ、
 	// もう片方がサブディレクトリにある構成を許すため。
-	if p := searchUp(dir, SharedFileName); p != "" {
+	if p := searchUp(dir, root, inRepo, SharedFileName); p != "" {
 		found = append(found, discovered{layer: LayerShared, path: p})
 	}
-	if p := searchUp(dir, LocalFileName); p != "" {
+	if p := searchUp(dir, root, inRepo, LocalFileName); p != "" {
 		found = append(found, discovered{layer: LayerLocal, path: p})
 	}
 	return found, nil
 }
 
-// searchUp は start から git root まで遡って name を探し、最初に見つかったものを返す。
+// gitRoot は start から遡って最初に見つかる git ワークツリーのルートを返す。
+func gitRoot(start string) (string, bool) {
+	dir := start
+	for {
+		if isGitRoot(dir) {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// searchUp は start から root まで遡って name を探し、最初に見つかったものを返す。
 //
 // 近い方が勝つ。同じ名前のファイルが途中の複数階層にあっても、マージはせず
 // 最も近い1枚だけを読む。全部を読むと「どこに何を書いたか」が追えなくなるため。
 //
-// git root が見つからない場合は start だけを見る。探索の上限が無いまま
-// 遡ると、リポジトリ外の無関係なファイルを拾いうるため。
-func searchUp(start, name string) string {
+// inRepo が false のとき（git リポジトリの外）は start だけを見る。上限の無いまま
+// 遡ると、ホームディレクトリに置き忘れた sumiq.local.yaml のような無関係な
+// ファイルを黙って読んでしまう。それは api_key_command の実行まで含む。
+func searchUp(start, root string, inRepo bool, name string) string {
 	dir := start
 	for {
 		p := filepath.Join(dir, name)
 		if fileExists(p) {
 			return p
 		}
-		if isGitRoot(dir) {
+		if !inRepo || dir == root {
 			return ""
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			// ファイルシステムの root まで来た。git root は無かった。
 			return ""
 		}
 		dir = parent
