@@ -62,7 +62,10 @@ masking:
       keep: domain
       note: "ドメインのみ残す。流入元の切り分けに使うため"
 
-    - patterns: ["*phone*", "*tel"]
+    - patterns: ["*phone*", "*tel*"]
+      # グロブは列名全体に一致する必要があるため "*tel" だと "tel_no" のような
+      # 列にはマッチしない。"*tel*" にして tel を含む列名を広く拾う
+      # （多少広すぎても、過剰にマスクする側の食い違いなので安全側に倒れる）。
       method: redact
       note: "電話番号は全件個人特定情報のため一律redact"
 
@@ -81,7 +84,8 @@ masking:
 
     # allowlist 運用（analytics の default_action: redact）で、集計に必要な列だけを
     # 明示的に通す例。method: none は共有ファイルにのみ書ける。regex: は使えないため
-    # 通したい列は1つずつグロブで挙げる（README.md「マスク設定はローカルから弱められない」節を参照）。
+    # 通したい列は1つずつグロブで挙げる（docs/adr/0010-mask-pattern-dialect.md §「regex: は
+    # method: none には書けない」を参照）。
     - patterns: ["id", "created_at", "status"]
       method: none
       note: "集計に必須かつ個人を特定できない列。allowlistに追加済み"
