@@ -250,7 +250,7 @@ Oracle / SQL Server は `apply_auto_limit` でクエリが壊れるため、該�
 
 以下は本 ADR の範囲外とし、必要になった時点で決める。
 
-- 出力形式（table / json / csv）とその既定値
+- ~~出力形式（table / json / csv）とその既定値~~ → [ADR-0004](./0004-output-formats.md) で決定
 - `partial` の `keep` オプションの詳細仕様
 - 接続先が増えた場合のプロファイル機能（endpoint 自体を切り替える必要が出たとき）
 - クエリ結果のキャッシュ（`max_age` の扱い）
