@@ -99,6 +99,28 @@ func (c *AddCmd) Run(deps *app.Deps) error {
 タグは型のない文字列 DSL で、検証は実行時。`requred` のようなタイポはコンパイルを通り、
 `kong.Parse()` で panic する。タグを追加・変更したら必ず一度起動して確認する。
 
+### `Run()` にインタフェース型を注入するなら `Bind` ではなく `BindFor` を使う
+
+`ctx.Run(deps)` で渡した値は具象型（`reflect.TypeOf` の実際の型）をキーに登録される
+（kong の `bindings map[reflect.Type]*binding`、`callbacks.go`）。`context.Context` の
+ような**インタフェース型**を `Run()` の引数として受け取るコマンドがある場合、
+`kong.New(&cli, kong.Bind(ctx))` では `ctx` の具象型（`context.Background()` なら
+`context.backgroundCtx` 等）で登録され、`Run(ctx context.Context, ...)` 側が要求する
+インタフェース型では引けない。`kong.Parse()` 自体は通り、`ctx.Run()` を呼んだ瞬間に
+`couldn't find binding of type context.Context ...` という実行時エラーになる
+（`options.go` の `BindFor` のコメントが対処法を示している）。
+
+```go
+// 悪い: ctx の具象型でしか引けず、context.Context 引数の Run() では見つからない
+parser, _ := kong.New(&cli, kong.Bind(ctx))
+
+// 良い: インタフェース型で明示的に登録する
+parser, _ := kong.New(&cli, kong.BindFor(ctx))
+```
+
+`internal/cli.Execute` が `context.Context` を注入する経路（#7）で踏んだ。他のインタフェース型
+（`io.Writer` 等）を `Run()` の直接の引数にする場合も同じ対処が要る。
+
 ### 安全側の検査は「判定できなかった」を「問題なし」に倒さない
 
 マスク・秘密の混入・行数のように、通してしまうと事故になる判定では、
