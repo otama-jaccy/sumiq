@@ -76,10 +76,57 @@ func New(opts Options) (*Client, error) {
 	if c.pollInterval <= 0 {
 		c.pollInterval = DefaultPollInterval
 	}
-	if c.httpClient == nil {
-		c.httpClient = &http.Client{}
-	}
+	c.httpClient = withRedirectsRefused(opts.HTTPClient)
 	return c, nil
+}
+
+// withRedirectsRefused はリダイレクトを追わない http.Client を返す。
+//
+// 既定の http.Client は2つの理由で使えない。
+//
+// 1つ目は API KEY の行き先。Go が Authorization を転送するかの判定は
+// ホスト名の比較だけで、スキームもポートも見ない（net/http の
+// shouldCopyHeaderOnRedirect が isDomainOrSubdomain を呼ぶ）。
+// そのため https://redash.example.com が http://redash.example.com へ
+// リダイレクトすると、API KEY が平文で流れる。実測で確認した。
+//
+// 2つ目はメソッドの取り違え。Go は 301 / 302 / 303 で POST を GET に落とす。
+// http:// のエンドポイントが https:// へリダイレクトする構成だと、
+// ジョブ投入の POST が黙って GET になり、POST しか受けない
+// QueryResultListResource が 405 を返す。利用者にはリダイレクトが
+// 起きたことが見えないまま、意味の分からない 405 だけが残る。
+//
+// Redash の API は通常リダイレクトしない。追わずに落とし、
+// リダイレクト先を endpoint に書き直してもらう方が確実に短い。
+func withRedirectsRefused(base *http.Client) *http.Client {
+	c := &http.Client{}
+	if base != nil {
+		// 呼び出し側が渡した http.Client のフィールドは書き換えない。
+		// Transport は共有して構わない（並行利用を前提にした型）。
+		copied := *base
+		c = &copied
+	}
+	c.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		// クエリは落とす。SSO のリダイレクト先には認証トークンが載る。
+		target := url.URL{Scheme: req.URL.Scheme, Host: req.URL.Host, Path: req.URL.Path}
+		return &redirectError{target: target.String()}
+	}
+	return c
+}
+
+// redirectError はリダイレクトを追わずに止めたことを表す。
+//
+// 専用の型にしてあるのは、http.Client が CheckRedirect の返したエラーを
+// *url.Error で包み、その URL フィールドに**リダイレクト先をクエリごと**
+// 入れるため。そのまま %w で包むと、伏せたはずのトークンが url.Error 側から
+// 出てくる。do はこの型を見つけたら包みを捨てて中身だけを返す。
+type redirectError struct {
+	target string
+}
+
+func (e *redirectError) Error() string {
+	return fmt.Sprintf("Redash が %s へのリダイレクトを返しました。リダイレクトは追いません。"+
+		"redash.endpoint にリダイレクト先を直接指定してください", e.target)
 }
 
 // parseEndpoint はベース URL を検証する。

@@ -113,7 +113,7 @@ func (c *Client) submit(ctx context.Context, q Query) (*job, error) {
 func (c *Client) wait(ctx context.Context, jobID string, first *job) (int64, error) {
 	cur := first
 	for {
-		done, err := cur.finished()
+		done, err := c.finished(cur)
 		if err != nil {
 			return 0, err
 		}
@@ -219,9 +219,16 @@ func (c *Client) do(ctx context.Context, method, url string, body []byte, dst an
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// err は *url.Error でメソッドと URL を含む。API KEY はヘッダに入れて
-		// いるので URL には出ない。念のため scrub は通さず、リクエストの
-		// ダンプも載せない。
+		// リダイレクトで止めた場合は url.Error の包みを捨てる。
+		// 包みの URL フィールドにはリダイレクト先がクエリごと入っており、
+		// SSO のトークンを載せたまま返すことになる。
+		var redirErr *redirectError
+		if errors.As(err, &redirErr) {
+			return redirErr
+		}
+		// それ以外の err は *url.Error でメソッドと URL を含む。URL は検証済みの
+		// endpoint から組み立てたもので、クエリも認証情報も持たない。
+		// API KEY はヘッダにあるので出ない。リクエストのダンプも載せない。
 		return fmt.Errorf("Redash への接続に失敗しました: %w", err)
 	}
 	defer func() {
