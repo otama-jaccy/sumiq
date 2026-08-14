@@ -32,6 +32,42 @@ var leakColumns = []string{
 	"e",
 }
 
+// TestAllowlistHoleIsWholeMatch は method: none で開ける穴が、
+// 書いた列名の分だけであることを見る。
+//
+// regex: は部分一致なので、regex:user_id と書くと user_identity や
+// hashed_user_id まで素通しになる。allowlist に穴を開ける唯一の手段に
+// 部分一致を許さない。
+func TestAllowlistHoleIsWholeMatch(t *testing.T) {
+	allowlist := config.Masking{
+		DefaultAction: config.ActionRedact,
+		Rules:         []config.MaskRule{rule(config.MaskNone, "user_id")},
+	}
+	e, err := New(testConfig(allowlist), testDataSource)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	cols := []string{"user_id", "user_id_email", "user_identity", "hashed_user_id_secret"}
+	row := make([]any, len(cols))
+	for i := range row {
+		row[i] = secretValue
+	}
+	got, _, err := e.Apply(result(cols, row))
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if got.Rows[0][0] != secretValue {
+		t.Errorf("穴を開けた列 user_id = %#v, want %q", got.Rows[0][0], secretValue)
+	}
+	for i, c := range cols[1:] {
+		if got.Rows[0][i+1] != redacted {
+			t.Errorf("列 %q = %#v, want %q", c, got.Rows[0][i+1], redacted)
+		}
+	}
+}
+
 // maskingMethods は値を隠す method（none 以外）。
 var maskingMethods = []config.MaskMethod{
 	config.MaskPartial,
