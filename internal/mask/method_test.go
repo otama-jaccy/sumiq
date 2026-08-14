@@ -2,6 +2,7 @@ package mask
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -189,6 +190,10 @@ func TestKeepEnds(t *testing.T) {
 		{"空の値", "", 2, 0, "****"},
 		{"何も残さない指定", "abcdef", 0, 0, "****"},
 		{"マルチバイトはルーンで数える", "日本語です", 2, 0, "日本****"},
+		// prefix + suffix が桁溢れして負になると、合計だけを見る検査は
+		// すり抜け、rs[:prefix] で落ちる。
+		{"桁溢れする指定", "abcdef", math.MaxInt, 1, "****"},
+		{"桁溢れする指定（末尾）", "abcdef", 1, math.MaxInt, "****"},
 	}
 
 	for _, tt := range tests {
@@ -213,7 +218,14 @@ func TestApplyPartialDomain(t *testing.T) {
 		{"notanemail", partialSpec{domain: true}, "****"},
 		{"notanemail", partialSpec{domain: true, prefix: 3}, "not****"},
 		{"@example.com", partialSpec{domain: true}, "****@example.com"},
-		{"user@", partialSpec{domain: true}, "****@"},
+		{"user@localhost", partialSpec{domain: true}, "****@localhost"},
+		{"user@日本語.jp", partialSpec{domain: true}, "****@日本語.jp"},
+		// @ の後ろがホスト名の形をしていなければ残さない。自由記述の列に
+		// *mail* のようなパターンが掛かると、本文が丸ごと出る。
+		{"送付先は bob@corp.example.com、案件は #4471 です", partialSpec{domain: true}, "****"},
+		{"contact bob@example.com now", partialSpec{domain: true}, "****"},
+		{"user@", partialSpec{domain: true}, "****"},
+		{"user@ example.com", partialSpec{domain: true}, "****"},
 	}
 
 	for _, tt := range tests {
