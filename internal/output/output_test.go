@@ -159,6 +159,27 @@ func TestTableDoesNotTruncateLongValues(t *testing.T) {
 	}
 }
 
+func TestTableEscapesControlCharacters(t *testing.T) {
+	res := result([]string{"id", "memo"},
+		[]any{"1", "line1\tline2\nline3"},
+		[]any{"2", "normal"})
+
+	var out, errW bytes.Buffer
+	if err := Render(&out, &errW, Table, res, mask.Summary{}, false); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	// エスケープしないと \t \n が tabwriter に列・行の区切りとして読まれ、
+	// 行数がずれる。ヘッダ + データ2行の3行のままであることを確認する。
+	if len(lines) != 3 {
+		t.Fatalf("行数 = %d, want 3 (エスケープされずに tabwriter の境界として解釈された): %q", len(lines), out.String())
+	}
+	if !strings.Contains(out.String(), `line1\tline2\nline3`) {
+		t.Errorf("table output にエスケープ後の値が無い: %q", out.String())
+	}
+}
+
 func TestTableDropsDecorationWhenNotTTY(t *testing.T) {
 	res := result([]string{"id", "email"}, []any{"1", "a@example.com"})
 

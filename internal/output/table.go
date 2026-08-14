@@ -58,5 +58,23 @@ func tableCell(v any) string {
 	if v == nil {
 		return "NULL"
 	}
-	return mask.RenderValue(v)
+	return escapeForTable(mask.RenderValue(v))
+}
+
+// tableEscaper は tabwriter がセル・行の境界として読む制御文字を、
+// 見える形のエスケープ列に変える。
+//
+// method: none や partial で残った自由記述の値がタブや改行を含むと、
+// tabwriter はそれを列・行の区切りと解釈し、以降のセルが隣の行や列に
+// ずれる。切り詰めとは違い、情報を失わず表現だけを変えて表の構造を守る。
+var tableEscaper = strings.NewReplacer(
+	"\t", `\t`,
+	"\n", `\n`,
+	"\r", `\r`,
+	"\f", `\f`,
+	"\v", `\v`,
+)
+
+func escapeForTable(s string) string {
+	return tableEscaper.Replace(s)
 }
