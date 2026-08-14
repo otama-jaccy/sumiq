@@ -1,0 +1,23 @@
+# ビルド成果物
+/sumiq
+/dist/
+*.exe
+*.so
+*.dylib
+
+# テスト・カバレッジ
+*.test
+*.out
+coverage.*
+
+# 依存を vendor する場合は下行を外す
+# /vendor/
+
+# 環境依存
+.env
+.env.local
+
+# エディタ / OS
+.DS_Store
+.idea/
+*.swp
