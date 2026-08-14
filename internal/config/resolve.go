@@ -31,7 +31,7 @@ func (o Options) lookupEnv(name string) (string, bool) {
 	if o.Environ == nil {
 		return os.LookupEnv(name)
 	}
-	return environLookup(o.Environ)(name)
+	return lookupIn(o.Environ, name)
 }
 
 func (o Options) tracked(path string) (bool, error) {

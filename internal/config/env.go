@@ -128,22 +128,23 @@ func assignEnum[T ~string](v string, allowed []T, dst *T) error {
 	return fmt.Errorf("不正な値 %q。指定できるのは %s", v, quotedList(allowed))
 }
 
-// environLookup は os.Environ() 形式のスライスを引ける形にする。
+// lookupIn は os.Environ() 形式のスライスから name を引く。
 //
 // 環境をスライスで受け取れるようにしているのは、テストからプロセスの環境を
 // 触らずに済ませるため。os.Setenv はテスト間で状態が漏れる。
-func environLookup(environ []string) func(string) (string, bool) {
-	m := make(map[string]string, len(environ))
-	for _, kv := range environ {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
+//
+// 後ろから探すことで、同じ名前が複数あれば後勝ちになる。exec が子プロセスに
+// 渡す環境の扱いと揃えている。
+func lookupIn(environ []string, name string) (string, bool) {
+	for i := len(environ) - 1; i >= 0; i-- {
+		if k, v, ok := strings.Cut(environ[i], "="); ok && k == name {
+			return v, true
 		}
-		// 同じ名前が複数あれば後勝ち。exec が渡す環境と同じ扱いにする。
-		m[k] = v
 	}
-	return func(name string) (string, bool) {
-		v, ok := m[name]
-		return v, ok
-	}
+	return "", false
+}
+
+// environLookup は lookupIn を関数の形にする。
+func environLookup(environ []string) func(string) (string, bool) {
+	return func(name string) (string, bool) { return lookupIn(environ, name) }
 }

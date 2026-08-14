@@ -16,18 +16,21 @@ import (
 // 上限が無ければ sumiq は無言で止まったままになる。
 const apiKeyCommandTimeout = 30 * time.Second
 
+// apiKeyCommandWaitDelay は打ち切り後にパイプを強制的に閉じるまでの猶予。
+const apiKeyCommandWaitDelay = 5 * time.Second
+
 // apiKeySource は API KEY の指定1つ分と、その出どころ。
 //
 // api_key と api_key_command は「どちらか一方」であり、レイヤをまたいで
 // 混ざらないよう組で差し替える。共有ファイルに api_key_command、ローカルに
 // api_key を書いた場合、後から読むローカルの指定だけが残る。
+// git 管理下かの検査はここではなく checkAPIKeyFiles が全ファイルに対して行う。
+// 勝ったレイヤの出どころは検査に要らないため、パスは持たない。
 type apiKeySource struct {
 	key     string
 	command []string
 	layer   Layer
-	// path はファイル由来なら実パス。git 管理下かの判定に使う。
-	path string
-	set  bool
+	set     bool
 }
 
 // absorb は l に API KEY の指定があれば、それで丸ごと置き換える。
@@ -46,7 +49,6 @@ func (s *apiKeySource) absorb(l layered) error {
 		key:     r.APIKey,
 		command: r.APIKeyCommand,
 		layer:   l.layer,
-		path:    l.path,
 		set:     true,
 	}
 	return nil
@@ -109,6 +111,11 @@ func runAPIKeyCommand(command []string, layer Layer) (string, error) {
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
+	// WaitDelay が無いと締切は守られない。CommandContext が kill するのは
+	// 直接の子だけで、孫が標準出力のパイプを握ったままなら Output() は
+	// EOF を待って止まり続ける（api_key_command: ["sh", "-c", "daemon & op read ..."]）。
+	// 上限を設けた意味が消えるため、kill 後にパイプを強制的に閉じる。
+	cmd.WaitDelay = apiKeyCommandWaitDelay
 
 	out, err := cmd.Output()
 	if err != nil {
@@ -190,7 +197,13 @@ func gitTracked(path string) (bool, error) {
 
 	// カレントディレクトリではなく対象ファイルの位置を基準に問い合わせる。
 	// sumiq はサブディレクトリからも、リポジトリの外からも起動されうる。
-	cmd := exec.Command("git", "-C", filepath.Dir(abs), "ls-files", "--error-unmatch", "--", abs)
+	//
+	// --literal-pathspecs は必須。git はパスを pathspec として解釈するため、
+	// これが無いと proj[1] のような名前のディレクトリでパスが glob として
+	// 扱われ、実在するファイルにマッチせず「追跡外」が返る。秘密の混入を
+	// 止める検査が、チェックアウト先の名前次第で開いてしまう。
+	cmd := exec.Command("git", "-C", filepath.Dir(abs), "--literal-pathspecs",
+		"ls-files", "--error-unmatch", "--", abs)
 	if err = cmd.Run(); err == nil {
 		return true, nil
 	}
