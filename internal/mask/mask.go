@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/otama-jaccy/sumiq/internal/config"
 	"github.com/otama-jaccy/sumiq/internal/redash"
@@ -192,6 +193,16 @@ func compileRule(r config.MaskRule, known []config.DataSource) (compiledRule, er
 
 	cr := compiledRule{mask: columnMask{method: r.Method, partial: spec}}
 	for _, p := range r.Patterns {
+		// method: none は allowlist に穴を開ける唯一の手段であり、
+		// 意図した列だけに掛かることが確かめられなければならない。
+		// regex: は部分一致なので、regex:user_id と書くと user_identity や
+		// hashed_user_id まで素通しになる。グロブは全体一致なので、
+		// 書いた名前がそのまま穴の大きさになる。
+		if r.Method == config.MaskNone && strings.HasPrefix(p, regexPrefix) {
+			return compiledRule{}, fmt.Errorf("パターン %q: method: none に %s は書けません。"+
+				"%s は部分一致のため、意図した列より広く素通しになります。"+
+				"通す列をグロブで1つずつ挙げてください", p, regexPrefix, regexPrefix)
+		}
 		m, err := compilePattern(p)
 		if err != nil {
 			return compiledRule{}, err

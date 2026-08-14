@@ -480,6 +480,12 @@ func TestNewRejects(t *testing.T) {
 			want: "data_sources[0]",
 		},
 		{
+			// regex: は部分一致なので、意図した列より広く素通しになる。
+			name:    "method: none に書いた regex:",
+			masking: masking(rule(config.MaskNone, "regex:^user_id$")),
+			want:    "method: none",
+		},
+		{
 			// method: partial の書き忘れ。そのまま通すと列が丸ごと素通りする。
 			name:    "partial 以外に書いた keep_prefix",
 			masking: masking(config.MaskRule{Patterns: []string{"a"}, Method: config.MaskNone, KeepPrefix: 3}),
