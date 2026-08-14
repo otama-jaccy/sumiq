@@ -32,10 +32,26 @@ func masking(rules ...config.MaskRule) config.Masking {
 	return config.Masking{DefaultAction: config.ActionNone, Rules: rules}
 }
 
+// testDataSources はテストで参照するデータソースの定義。
+// data_sources に書いた名前は定義済みでなければ New に弾かれる。
+func testDataSources() []config.DataSource {
+	return []config.DataSource{
+		{Name: testDataSource, ID: 1},
+		{Name: "sandbox", ID: 2},
+		{Name: "other", ID: 3},
+		{Name: "prod", ID: 4},
+	}
+}
+
+// testConfig はマスク方針とデータソース定義から設定を組み立てる。
+func testConfig(m config.Masking) config.Config {
+	return config.Config{Masking: m, DataSources: testDataSources()}
+}
+
 func newEngine(t *testing.T, m config.Masking, rules ...config.MaskRule) *Engine {
 	t.Helper()
 	m.Rules = append(m.Rules, rules...)
-	e, err := New(m, config.DataSource{Name: testDataSource, ID: 1})
+	e, err := New(testConfig(m), testDataSource)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -239,10 +255,11 @@ func TestDefaultAction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e, err := New(
-				config.Masking{DefaultAction: tt.global, Rules: tt.rules},
-				config.DataSource{Name: testDataSource, ID: 1, DefaultAction: tt.perDS},
-			)
+			cfg := config.Config{
+				Masking:     config.Masking{DefaultAction: tt.global, Rules: tt.rules},
+				DataSources: []config.DataSource{{Name: testDataSource, ID: 1, DefaultAction: tt.perDS}},
+			}
+			e, err := New(cfg, testDataSource)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -278,17 +295,11 @@ func TestDataSourceScope(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e, err := New(
-				config.Masking{
-					DefaultAction: config.ActionNone,
-					Rules: []config.MaskRule{{
-						Patterns:    []string{"memo"},
-						Method:      config.MaskRedact,
-						DataSources: tt.scope,
-					}},
-				},
-				config.DataSource{Name: tt.dataSource, ID: 1},
-			)
+			e, err := New(testConfig(masking(config.MaskRule{
+				Patterns:    []string{"memo"},
+				Method:      config.MaskRedact,
+				DataSources: tt.scope,
+			})), tt.dataSource)
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -339,7 +350,7 @@ func TestOtherDataSourceRuleIsValidated(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := tt.rule
 			r.DataSources = []string{"prod"}
-			_, err := New(masking(r), config.DataSource{Name: "analytics", ID: 1})
+			_, err := New(testConfig(masking(r)), testDataSource)
 			if err == nil {
 				t.Fatal("別のデータソース向けのルールの誤りが素通りしました")
 			}
@@ -392,21 +403,21 @@ func TestApplyNilResult(t *testing.T) {
 
 func TestNewRejects(t *testing.T) {
 	tests := []struct {
-		name    string
-		masking config.Masking
-		ds      config.DataSource
-		want    string
+		name       string
+		masking    config.Masking
+		perDS      config.Action
+		dataSource string
+		want       string
 	}{
 		{
-			name:    "データソース名が空",
-			masking: masking(rule(config.MaskRedact, "a")),
-			ds:      config.DataSource{ID: 1},
-			want:    "データソース名",
+			name:       "定義されていないデータソース",
+			masking:    masking(rule(config.MaskRedact, "a")),
+			dataSource: "analitycs",
+			want:       "定義されていません",
 		},
 		{
 			name:    "default_action が未解決",
 			masking: config.Masking{Rules: []config.MaskRule{rule(config.MaskRedact, "a")}},
-			ds:      config.DataSource{Name: testDataSource, ID: 1},
 			want:    "default_action",
 		},
 		{
@@ -459,9 +470,30 @@ func TestNewRejects(t *testing.T) {
 			want: "data_sources[0]",
 		},
 		{
+			// 綴り間違いはどのデータソースにも一致せず、ルールを丸ごと無効にする。
+			name: "定義されていないデータソースを指すルール",
+			masking: masking(config.MaskRule{
+				Patterns:    []string{"a"},
+				Method:      config.MaskRedact,
+				DataSources: []string{"analitycs"},
+			}),
+			want: "data_sources[0]",
+		},
+		{
+			// method: partial の書き忘れ。そのまま通すと列が丸ごと素通りする。
+			name:    "partial 以外に書いた keep_prefix",
+			masking: masking(config.MaskRule{Patterns: []string{"a"}, Method: config.MaskNone, KeepPrefix: 3}),
+			want:    "partial",
+		},
+		{
+			name:    "partial 以外に書いた keep",
+			masking: masking(config.MaskRule{Patterns: []string{"a"}, Method: config.MaskHash, Keep: keepDomain}),
+			want:    "partial",
+		},
+		{
 			name:    "扱えないデータソース単位の default_action",
 			masking: masking(rule(config.MaskRedact, "a")),
-			ds:      config.DataSource{Name: testDataSource, ID: 1, DefaultAction: config.Action("mask")},
+			perDS:   config.Action("mask"),
 			want:    "default_action",
 		},
 		{
@@ -470,18 +502,20 @@ func TestNewRejects(t *testing.T) {
 			masking: config.Masking{
 				Rules: []config.MaskRule{rule(config.MaskRedact, "a")},
 			},
-			ds:   config.DataSource{Name: testDataSource, ID: 1, DefaultAction: config.ActionRedact},
-			want: "masking.default_action",
+			perDS: config.ActionRedact,
+			want:  "masking.default_action",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ds := tt.ds
-			if ds.Name == "" && tt.want != "データソース名" {
-				ds = config.DataSource{Name: testDataSource, ID: 1}
+			cfg := testConfig(tt.masking)
+			cfg.DataSources[0].DefaultAction = tt.perDS
+			name := tt.dataSource
+			if name == "" {
+				name = testDataSource
 			}
-			_, err := New(tt.masking, ds)
+			_, err := New(cfg, name)
 			if err == nil {
 				t.Fatal("エラーになりませんでした")
 			}

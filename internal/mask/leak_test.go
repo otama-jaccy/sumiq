@@ -103,10 +103,7 @@ func TestUnmatchedPatternDoesNotHideMatchedOne(t *testing.T) {
 // TestDefaultRedactMasksEveryColumn は allowlist 運用で、ルールが1つも
 // 無くても全ての列が伏せられることを見る。
 func TestDefaultRedactMasksEveryColumn(t *testing.T) {
-	e, err := New(
-		config.Masking{DefaultAction: config.ActionRedact},
-		config.DataSource{Name: testDataSource, ID: 1},
-	)
+	e, err := New(testConfig(config.Masking{DefaultAction: config.ActionRedact}), testDataSource)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -133,10 +130,7 @@ func TestDefaultRedactMasksEveryColumn(t *testing.T) {
 func assertMasked(t *testing.T, column string, method config.MaskMethod, r config.MaskRule) {
 	t.Helper()
 
-	e, err := New(
-		config.Masking{DefaultAction: config.ActionNone, Rules: []config.MaskRule{r}},
-		config.DataSource{Name: testDataSource, ID: 1},
-	)
+	e, err := New(testConfig(masking(r)), testDataSource)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

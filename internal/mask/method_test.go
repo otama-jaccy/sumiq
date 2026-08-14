@@ -218,8 +218,12 @@ func TestApplyPartialDomain(t *testing.T) {
 		{"notanemail", partialSpec{domain: true}, "****"},
 		{"notanemail", partialSpec{domain: true, prefix: 3}, "not****"},
 		{"@example.com", partialSpec{domain: true}, "****@example.com"},
-		{"user@localhost", partialSpec{domain: true}, "****@localhost"},
 		{"user@日本語.jp", partialSpec{domain: true}, "****@日本語.jp"},
+		// ドットが無い並びは残さない。自由記述に混ざったメンションと
+		// TLD 無しのアドレスを区別できないため、残さない側に倒す。
+		{"user@localhost", partialSpec{domain: true}, "****"},
+		{"連絡先: @taro_handle", partialSpec{domain: true}, "****"},
+		{"担当 @yamada", partialSpec{domain: true}, "****"},
 		// @ の後ろがホスト名の形をしていなければ残さない。自由記述の列に
 		// *mail* のようなパターンが掛かると、本文が丸ごと出る。
 		{"送付先は bob@corp.example.com、案件は #4471 です", partialSpec{domain: true}, "****"},

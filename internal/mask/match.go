@@ -16,6 +16,16 @@ const regexPrefix = "regex:"
 // 同じ列が email でも Email でも返りうる。片方だけマスクが外れるより、
 // 両方に掛かる方に倒す。正規表現で区別が要る場合は (?-i) で戻せる。
 //
+// **グロブは全体一致、regex: は部分一致になる。** 正規表現の既定を曲げると
+// 他のツールと挙動が変わるため揃えない。ADR-0003 §7 の例が
+// regex:^(first|last)_name$ と明示的に錨を打っているのはこのため。
+//
+// この非対称は method: none で効き方が変わる。default_action: redact の
+// allowlist 運用で regex:user_id を素通しにすると、user_identity や
+// user_id_hash まで素通しになる。同じ意図をグロブの user_id で書いた
+// 場合は user_id だけが素通しになる。allowlist に穴を開けるときは
+// ^ と $ を書くこと。
+//
 // 組み立てられないパターンはエラーにする。マッチしないパターンとして
 // 読み飛ばすと、そのルールが消えたまま実行される。
 func compilePattern(p string) (*regexp.Regexp, error) {
