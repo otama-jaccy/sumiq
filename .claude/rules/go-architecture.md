@@ -338,6 +338,7 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
   （上の「`path.Match` を使わない」の背景）
 - [ADR-0011](../../docs/adr/0011-partial-keep-options.md): `partial` の `keep` の仕様
   （上の「残す条件として書く」の背景）
+- [ADR-0012](../../docs/adr/0012-poll-transient-retry.md): ポーリング中の一時的な失敗（接続失敗・429・5xx）のリトライ方針
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 
