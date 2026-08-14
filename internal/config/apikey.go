@@ -124,7 +124,12 @@ func runAPIKeyCommand(command []string, layer Layer) (string, error) {
 	// WaitDelay が無いと締切は守られない。CommandContext が kill するのは
 	// 直接の子だけで、孫が標準出力のパイプを握ったままなら Output() は
 	// EOF を待って止まり続ける（api_key_command: ["sh", "-c", "daemon & op read ..."]）。
-	// 上限を設けた意味が消えるため、kill 後にパイプを強制的に閉じる。
+	// os/exec のドキュメントが WaitDelay の対象として挙げている
+	// 「終了したがパイプを閉じないままの子プロセス」がまさにこれ。
+	//
+	// パイプを強制的に閉じた場合、コマンドが成功していても Wait は
+	// ErrWaitDelay を返す。その場合はエラー扱いになるが、パイプを掴んだまま
+	// 残るコマンドを API KEY の取得元として信用する理由も無い。
 	cmd.WaitDelay = apiKeyCommandWaitDelay
 
 	out, err := cmd.Output()
@@ -217,10 +222,16 @@ func gitTracked(path string) (bool, error) {
 	// カレントディレクトリではなく対象ファイルの位置を基準に問い合わせる。
 	// sumiq はサブディレクトリからも、リポジトリの外からも起動されうる。
 	//
-	// --literal-pathspecs は必須。git はパスを pathspec として解釈するため、
-	// これが無いと proj[1] のような名前のディレクトリでパスが glob として
-	// 扱われ、実在するファイルにマッチせず「追跡外」が返る。秘密の混入を
-	// 止める検査が、チェックアウト先の名前次第で開いてしまう。
+	// --literal-pathspecs を付けるのは、パスを pathspec として渡している以上
+	// glob 解釈の対象になるため。git のドキュメントは pathspec に globbing と
+	// pathspec magic が効くと明記しており、この指定はそれを無効にする。
+	//
+	// 手元の git 2.39.5 では proj[1] のようなディレクトリ名でも
+	// --error-unmatch は 0 を返した（ls-files は index の項目と literal に
+	// 突き合わせるため）。つまり実害は再現していない。ただしそれは
+	// ドキュメントに書かれた挙動ではなく、依存すべきものでもない。
+	// 秘密の混入を止める検査をチェックアウト先の名前に左右させたくないので、
+	// 明示的に literal にしておく。
 	cmd := exec.Command("git", "-C", filepath.Dir(abs), "--literal-pathspecs",
 		"ls-files", "--error-unmatch", "--", abs)
 	var stderr strings.Builder
@@ -233,7 +244,8 @@ func gitTracked(path string) (bool, error) {
 	if errors.Is(err, exec.ErrNotFound) {
 		return false, nil
 	}
-	// --error-unmatch は「追跡外」のときだけ 1 を返す。それ以外の
+	// --error-unmatch は「index に無い」ときだけ 1 を返す（git のドキュメントに
+	// "treat this as an error (return 1)" と明記されている）。それ以外の
 	// 終了コードは git 自体が失敗したという意味であり、追跡外ではない。
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
