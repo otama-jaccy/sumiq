@@ -71,6 +71,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("version: %d は扱えません。対応しているのは %d だけです", c.Version, SchemaVersion)
 	}
 
+	// 0 は「未指定」と区別できないため（int で受けている）ここでは弾けない。
+	// 負の値は書き間違い以外にありえず、行数ガードを常に発火させる。
+	if c.Query.MaxRows < 0 {
+		return fmt.Errorf("query.max_rows に負の値は指定できません: %d", c.Query.MaxRows)
+	}
+
 	for i, ds := range c.DataSources {
 		if ds.Name == "" {
 			return fmt.Errorf("data_sources[%d]: name が指定されていません", i)

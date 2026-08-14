@@ -220,6 +220,8 @@ func TestLoad_Errors(t *testing.T) {
 		{name: "duration に単位なし", yaml: "version: 1\nredash: {timeout: 300}\n", wantMsg: "duration として読めません"},
 		{name: "duration が不正", yaml: "version: 1\nredash: {timeout: しばらく}\n", wantMsg: "duration として読めません"},
 		{name: "duration が負", yaml: "version: 1\nredash: {poll_interval: -1s}\n", wantMsg: "負の値"},
+		// 0s は未指定と同じ扱いになり、書いた値が黙って差し替わる。
+		{name: "duration が 0", yaml: "version: 1\nredash: {timeout: 0s}\n", wantMsg: "0 は指定できません"},
 
 		// enum
 		{name: "method が不正", yaml: "version: 1\nmasking:\n  rules:\n    - patterns: [a]\n      method: redct\n", wantMsg: `不正な値 "redct"`},
@@ -232,6 +234,8 @@ func TestLoad_Errors(t *testing.T) {
 		{name: "データソースに name がない", yaml: "version: 1\ndata_sources: [{id: 1}]\n", wantMsg: "name が指定されていません"},
 		{name: "データソースに id がない", yaml: "version: 1\ndata_sources: [{name: a}]\n", wantMsg: "id は 1 以上"},
 		{name: "patterns が空", yaml: "version: 1\nmasking:\n  rules:\n    - patterns: []\n      method: redact\n", wantMsg: "patterns が空です"},
+		// 0 は未指定と区別できないので弾けないが、負の値は書き間違い以外にない。
+		{name: "max_rows が負", yaml: "version: 1\nquery: {max_rows: -1}\n", wantMsg: "負の値は指定できません"},
 		{name: "method がない", yaml: "version: 1\nmasking:\n  rules:\n    - patterns: [a]\n", wantMsg: "method が指定されていません"},
 
 		// その他
@@ -337,7 +341,6 @@ func TestLoad_Duration(t *testing.T) {
 		{name: "1秒", yaml: "1s", want: time.Second},
 		{name: "分と秒", yaml: "1m30s", want: 90 * time.Second},
 		{name: "ミリ秒", yaml: "500ms", want: 500 * time.Millisecond},
-		{name: "ゼロ", yaml: "0s", want: 0},
 	}
 
 	for _, tt := range tests {
