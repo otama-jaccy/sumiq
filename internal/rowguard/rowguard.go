@@ -76,7 +76,8 @@ func (e *ExceededError) Error() string {
 		"query.on_exceed: error のため出力を中止しました", e.Got, e.MaxRows)
 }
 
-// Check は取得済みの結果を max_rows で判定する。
+// Check は取得済みの結果を max_rows で判定する。ds は auto_limit の
+// データソース単位の上書きを解決するために渡す（EffectiveAutoLimit 参照）。
 //
 // res.Rows 全体の長さを見てから判定する。ストリーミングはしない —
 // 何行あるか自体が安全装置の判定材料であり、書き出しながら数える実装は
@@ -88,7 +89,13 @@ func (e *ExceededError) Error() string {
 //
 // on_exceed: truncate で切り詰めた場合は、その事実を errW に書く。
 // on_exceed: error で超過した場合は errW に何も書かず ExceededError を返す。
-func Check(errW io.Writer, res *redash.Result, q config.Query) (*redash.Result, error) {
+//
+// auto_limit が効いていない場合、Redash 側の LIMIT が掛からず、判定した行数が
+// 実は全件転送の結果である可能性がある（ADR-0003 §10 の「全件転送後に判定。
+// 大量転送の可能性を警告」）。max_rows 以下に収まっていても、この可能性は
+// errW に警告する。truncate / error で既に警告・エラーになっている場合は、
+// 転送量の話より優先度が低いため重ねて出さない。
+func Check(errW io.Writer, res *redash.Result, q config.Query, ds config.DataSource) (*redash.Result, error) {
 	if res == nil {
 		return nil, errors.New("rowguard: 判定対象の結果がありません")
 	}
@@ -96,12 +103,22 @@ func Check(errW io.Writer, res *redash.Result, q config.Query) (*redash.Result, 
 		return nil, fmt.Errorf("rowguard: query.max_rows が指定されていません: %d", q.MaxRows)
 	}
 	if len(res.Rows) <= q.MaxRows {
+		if !EffectiveAutoLimit(q, ds) {
+			if _, err := fmt.Fprintf(errW, "Warning: auto_limit が無効です。"+
+				"Redash 側の行数制限が掛からないため、取得した %d 行は全件転送された可能性があります\n",
+				len(res.Rows)); err != nil {
+				return nil, fmt.Errorf("rowguard: auto_limit の警告を書き出せませんでした: %w", err)
+			}
+		}
 		return res, nil
 	}
 
 	switch q.OnExceed {
 	case config.OnExceedTruncate:
-		out := &redash.Result{Columns: res.Columns, Rows: res.Rows[:q.MaxRows]}
+		// 3つ目のインデックスで cap を len に固定する。切らないと戻り値の
+		// Rows が res.Rows と同じ配列を指したままになり、呼び出し側が戻り値に
+		// append すると capacity 内の書き込みが res.Rows 側にも及ぶ。
+		out := &redash.Result{Columns: res.Columns, Rows: res.Rows[:q.MaxRows:q.MaxRows]}
 		if _, err := fmt.Fprintf(errW, "Warning: 結果が %d 行あり、max_rows (%d) 件に切り詰めました\n",
 			len(res.Rows), q.MaxRows); err != nil {
 			return nil, fmt.Errorf("rowguard: 切り詰めの警告を書き出せませんでした: %w", err)

@@ -117,17 +117,22 @@ func TestCheck(t *testing.T) {
 		nilResult   bool
 		maxRows     int
 		onExceed    config.OnExceed
+		autoLimit   *bool
 		wantRows    int // 成功時に期待する行数
 		wantErr     bool
-		wantExceed  bool // ExceededError を期待する
-		wantWarning bool // errW に切り詰めの警告を期待する
+		wantExceed  bool   // ExceededError を期待する
+		wantWarnSub string // errW に含まれるべき部分文字列。空なら errW は空であるべき
 	}{
-		{name: "上限以下はそのまま通す", rows: 3, maxRows: 3, onExceed: config.OnExceedError, wantRows: 3},
+		{
+			name: "上限以下は警告なしで通す", rows: 3, maxRows: 3, onExceed: config.OnExceedError,
+			autoLimit: boolPtr(true), wantRows: 3,
+		},
 		{
 			name:       "on_exceed: error は超過分を一切返さない",
 			rows:       5,
 			maxRows:    3,
 			onExceed:   config.OnExceedError,
+			autoLimit:  boolPtr(true),
 			wantErr:    true,
 			wantExceed: true,
 		},
@@ -137,6 +142,7 @@ func TestCheck(t *testing.T) {
 			name:       "on_exceed 未指定は error 扱い",
 			rows:       5,
 			maxRows:    3,
+			autoLimit:  boolPtr(true),
 			wantErr:    true,
 			wantExceed: true,
 		},
@@ -145,12 +151,27 @@ func TestCheck(t *testing.T) {
 			rows:        5,
 			maxRows:     3,
 			onExceed:    config.OnExceedTruncate,
+			autoLimit:   boolPtr(true),
 			wantRows:    3,
-			wantWarning: true,
+			wantWarnSub: "切り詰め",
 		},
-		{name: "結果が nil はエラー", nilResult: true, maxRows: 10, wantErr: true},
-		{name: "max_rows 未指定はエラー", rows: 1, maxRows: 0, wantErr: true},
-		{name: "扱えない on_exceed はエラー", rows: 2, maxRows: 1, onExceed: config.OnExceed("bogus"), wantErr: true},
+		{
+			// ADR-0003 §10: auto_limit が効いていないと Redash 側の LIMIT が
+			// 掛からないため、max_rows 以下でも全件転送だった可能性を警告する。
+			name:        "auto_limit が無効だと上限以下でも全件転送の可能性を警告する",
+			rows:        3,
+			maxRows:     10,
+			onExceed:    config.OnExceedError,
+			autoLimit:   boolPtr(false),
+			wantRows:    3,
+			wantWarnSub: "auto_limit が無効です",
+		},
+		{name: "結果が nil はエラー", nilResult: true, maxRows: 10, autoLimit: boolPtr(true), wantErr: true},
+		{name: "max_rows 未指定はエラー", rows: 1, maxRows: 0, autoLimit: boolPtr(true), wantErr: true},
+		{
+			name: "扱えない on_exceed はエラー", rows: 2, maxRows: 1,
+			onExceed: config.OnExceed("bogus"), autoLimit: boolPtr(true), wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -160,9 +181,10 @@ func TestCheck(t *testing.T) {
 			if !tt.nilResult {
 				res = testResult(tt.rows)
 			}
-			q := config.Query{MaxRows: tt.maxRows, OnExceed: tt.onExceed}
+			q := config.Query{MaxRows: tt.maxRows, OnExceed: tt.onExceed, AutoLimit: tt.autoLimit}
+			ds := config.DataSource{}
 
-			got, err := Check(&errW, res, q)
+			got, err := Check(&errW, res, q, ds)
 
 			if tt.wantErr {
 				if err == nil {
@@ -197,12 +219,32 @@ func TestCheck(t *testing.T) {
 					t.Errorf("Rows[%d] = %v, 先頭からの %d 件であるべきです", i, row, tt.wantRows)
 				}
 			}
-			if tt.wantWarning && !strings.Contains(errW.String(), "切り詰め") {
-				t.Errorf("切り詰めた事実が errW に書かれていません: %q", errW.String())
+			if tt.wantWarnSub != "" && !strings.Contains(errW.String(), tt.wantWarnSub) {
+				t.Errorf("errW に %q を期待しましたが %q でした", tt.wantWarnSub, errW.String())
 			}
-			if !tt.wantWarning && errW.Len() != 0 {
+			if tt.wantWarnSub == "" && errW.Len() != 0 {
 				t.Errorf("警告を期待していないのに errW に書き込みがあります: %q", errW.String())
 			}
 		})
+	}
+}
+
+// TestCheck_TruncateDoesNotAliasOriginal は truncate した戻り値の Rows に
+// 追記しても、元の Result の Rows が壊れないことを見る（code-review の指摘：
+// cap を切らないスライスは同じ配列を指したままになる）。
+func TestCheck_TruncateDoesNotAliasOriginal(t *testing.T) {
+	var errW bytes.Buffer
+	res := testResult(5)
+	q := config.Query{MaxRows: 3, OnExceed: config.OnExceedTruncate, AutoLimit: boolPtr(true)}
+
+	got, err := Check(&errW, res, q, config.DataSource{})
+	if err != nil {
+		t.Fatalf("Check() 予期しないエラー: %v", err)
+	}
+
+	got.Rows = append(got.Rows, redash.Row{999})
+
+	if res.Rows[3][0] != 3 {
+		t.Errorf("truncate 後の append が元の Result を壊しました: res.Rows[3] = %v, want [3]", res.Rows[3])
 	}
 }
