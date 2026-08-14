@@ -33,20 +33,14 @@ data_sources:
   - name: sandbox
     id: 7
     description: "検証用データソース。個人情報を含まない"
-    # このデータソースだけ auto_limit を切る例。
-    # Oracle / SQL Server では apply_auto_limit がクエリを壊すことがあるため、
-    # 該当するデータソースはここで個別に false にする（README.md「auto_limit」節を参照）。
+    # データソース単位の auto_limit 上書きの例（README.md「auto_limit」節を参照）。
     auto_limit: false
 
 query:
-  # Redash に apply_auto_limit を渡すかどうか。効けばフルスキャン回避になる最適化だが、
-  # CTE を含むクエリや SQL 以外のデータソースでは黙って効かないことがある。
-  # 実際の防御線ではない。防御線は max_rows。
+  # auto_limit は最適化、max_rows が実際の安全装置（README.md「auto_limit」節を参照）。
   auto_limit: true
-  # 取得後にクライアント側で判定する安全装置。auto_limit と違い必ず効く。
   max_rows: 1000
-  # max_rows を超えたときの挙動。error: 何も出力せず失敗する / truncate: max_rows 件で切り詰めて出力する。
-  # 既定は error。truncate は「1000 件で切られた結果を全件だと誤認する」事故につながるため、
+  # max_rows 超過時の挙動。truncate は部分結果を全件と誤認する事故につながるため、
   # 必要な場合のみ明示的に選ぶこと。
   on_exceed: error
 
@@ -66,45 +60,30 @@ masking:
     - patterns: ["*email*"]
       method: partial
       keep: domain
-      # なぜ隠すか: メールアドレスは個人特定情報だが、ドメインだけ残せば
-      # 流入元（社内ドメインか一般ユーザか）の切り分けに使える。
       note: "ドメインのみ残す。流入元の切り分けに使うため"
 
     - patterns: ["*phone*", "*tel"]
       method: redact
-      # なぜ隠すか: 電話番号は個人特定情報。部分表示が必要な要求は今のところ無い。
       note: "電話番号は全件個人特定情報のため一律redact"
 
     - patterns: ["user_id", "customer_id"]
       method: hash
-      # なぜ隠すか: ID そのものは分析に使う（同一ユーザの行を集計・JOINしたい）が、
-      # 生の ID を渡すと Redash 外の情報と突き合わせて個人を特定できてしまう。
-      # 実行ごとに salt がランダムなため、実行をまたいだ突き合わせはできない
-      # （README.md「hash の salt」節を参照）。
-      note: "同一実行内でのみ集計・JOINしたい。実行をまたいだ突き合わせは仕様上不可"
+      note: "同一実行内でのみ集計・JOINしたい。実行をまたいだ突き合わせは仕様上不可（README.md「hashのsalt」節を参照）"
 
     - patterns: ["regex:^(first|last)_name$"]
       method: drop
-      # なぜ隠すか: 氏名は分析用途が無く、部分表示の需要も無い。列ごと消して
-      # 「取得したが空だった」という誤読も避ける。
       note: "分析に使わないため列ごと出力しない"
 
     - patterns: ["memo", "note"]
       method: redact
-      # なぜ隠すか: 自由記述欄はカスタマーサポートの引用等で個人情報が
-      # 混入しやすく、内容を精査するコストに見合わない。analytics のみ対象。
       note: "自由記述は個人情報混入のリスクが高いため一律redact（analyticsのみ）"
       data_sources: [analytics]
 
     # allowlist 運用（analytics の default_action: redact）で、集計に必要な列だけを
-    # 明示的に通す例。method: none は共有ファイルにのみ書ける
-    # （ローカルから書けると allowlist の弱化そのものになるため）。
-    # regex: は method: none には書けない（意図せず広い範囲を通してしまう事故を防ぐため）。
-    # 通したい列は1つずつグロブで挙げること。
+    # 明示的に通す例。method: none は共有ファイルにのみ書ける。regex: は使えないため
+    # 通したい列は1つずつグロブで挙げる（README.md「マスク設定はローカルから弱められない」節を参照）。
     - patterns: ["id", "created_at", "status"]
       method: none
-      # なぜ隠すか（このルールは逆に「隠さない」指定）: 集計・可視化に必須で、
-      # 個人を特定できない列であるためレビュー済みで allowlist に加えている。
       note: "集計に必須かつ個人を特定できない列。allowlistに追加済み"
 
 output:

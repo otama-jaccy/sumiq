@@ -5,10 +5,9 @@ Redash に ad-hoc クエリを投げ、設定に従ってマスクした結果�
 生の SQL 結果をそのまま画面や CI ログに流すのではなく、あらかじめレビューした
 マスク方針（`sumiq.yaml`）を通してから出力する。マスク方針は git 上のレビュー対象になる。
 
-**`sumiq` はセキュリティ境界ではない。** 利用者は Redash の API KEY を保持しており、
-`curl` を直接叩けば `sumiq` の設定を迂回して任意のデータソースを引ける。目的は
-アクセスを禁止することではなく、事故防止（データソースの指定ミス・マスク漏れ・
-想定外の大量取得を防ぐ）と、マスク方針をレビュー可能にすることにある。
+**`sumiq` はセキュリティ境界ではない。** API KEY を直接使えば設定を迂回できる。
+目的はアクセス制御ではなく、事故防止とマスク方針のレビュー可能化にある
+（設計判断の背景は [ADR-0003](docs/adr/0003-config-file-design.md) を参照）。
 
 ## インストール
 
@@ -26,8 +25,20 @@ go build -o sumiq ./cmd/sumiq
 
 ## 基本的な使い方
 
-1. 設定ファイルを用意する（次節「設定」を参照）
-2. API KEY を用意する（`sumiq.local.yaml` 経由、または環境変数）
+1. 設定ファイルを用意する（後述「設定」を参照。最短では次の2つをコピーするだけ）
+
+   ```bash
+   cp sumiq.yaml.example sumiq.yaml
+   cp sumiq.local.yaml.example sumiq.local.yaml
+   ```
+
+2. API KEY を用意する（後述「API KEY を共有ファイルに書くとエラーで停止する」節を参照。
+   最短では環境変数を使う）
+
+   ```bash
+   export SUMIQ_REDASH_API_KEY=xxxxxxxx
+   ```
+
 3. クエリを実行する
 
 ```bash
@@ -65,18 +76,13 @@ Rows: 342
 
 3・4 はカレントディレクトリから git リポジトリのルートまで遡って探索するため、
 サブディレクトリから実行しても読まれる。`--config` を明示した場合はこの探索
-（2〜4）をまとめてスキップする。
+（2〜4）をまとめてスキップする。詳細は [ADR-0003](docs/adr/0003-config-file-design.md) を参照。
 
-サンプルをコピーして使い始める。
-
-```bash
-cp sumiq.yaml.example sumiq.yaml
-cp sumiq.local.yaml.example sumiq.local.yaml
-```
+`sumiq.yaml.example` / `sumiq.local.yaml.example` をコピーして使い始める
+（クイックスタート参照）。
 
 - **`sumiq.yaml`（共有設定）** — Redash のエンドポイント、データソースの定義、
-  マスクルールを書く。git にコミットし、チームでレビューする。YAML を選んでいるのは、
-  各マスクルールに「なぜこの列を隠すのか」をコメントで残せるため
+  マスクルールを書く。git にコミットし、チームでレビューする
 - **`sumiq.local.yaml`（ローカル設定）** — API KEY と、個人の手元だけで使う
   データソース・追加のマスクルールを書く
 
@@ -117,41 +123,35 @@ API KEY の取得元は3経路。詳細は `sumiq.local.yaml.example` を参照�
   allowlist 運用（`default_action: redact`）で特定の列だけを通すための指定であり、
   ローカルから書けると弱化そのものになるため
 
+マージ規則の詳細（強度順序・厳格化のみ許可される項目 等）は
+[ADR-0003](docs/adr/0003-config-file-design.md) §7、強度順序に `null` を加えた
+経緯は [ADR-0009](docs/adr/0009-mask-null-strength.md) を参照。
+
 列名パターンは既定でグロブ（`*` は任意の並び、`?` は任意の1文字、大文字小文字を
-無視）。`[` を含むパターンはエラーになる（文字クラスか文字そのものか曖昧なため）。
-列名の一部だけを対象にしたい場合は `regex:` 接頭辞で正規表現に切り替える
-（`regex:` も大文字小文字を無視する）。詳細は
-[ADR-0010](docs/adr/0010-mask-pattern-dialect.md) を参照。
+無視）。`[` を含むパターンはエラーになる。列名の一部だけを対象にしたい場合は
+`regex:` 接頭辞で正規表現に切り替える（`regex:` も大文字小文字を無視する）。
+詳細は [ADR-0010](docs/adr/0010-mask-pattern-dialect.md) を参照。
 
 ### `hash` の salt は実行ごとにランダムで、実行をまたいだ突き合わせはできない
 
 `hash` は `sha256(salt + value)` の先頭12文字に置換する。**salt は実行のたびに
 ランダムに生成される。** 1回の実行内では一貫するため、同じ実行結果の中での
 件数集計や JOIN はできる。しかし**別の実行（別のコマンド呼び出し）が出した
-ハッシュ値とは、値が同じでも突き合わせられない。**
-
-salt を固定・共有すると、`user_id` のような低カーディナリティ値は総当たりで
-復元できてしまう。逆にローカル固有の salt にすると人によって値が変わり、
-やはり突き合わせられない。どちらも中途半端であるため、突き合わせは仕様上
-できないと割り切っている。実行をまたいで同じ値を追跡したい場合は `hash` 以外の
-方法（`partial` 等、掲載する情報を吟味した上で）を検討すること。
+ハッシュ値とは、値が同じでも突き合わせられない。** これは仕様であり、固定・共有
+salt にする予定はない（低カーディナリティ値の総当たり復元を防ぐため）。詳細は
+[ADR-0003](docs/adr/0003-config-file-design.md) §9 を参照。
 
 ### `auto_limit` は効かないケースがあり、実際の防御線は `max_rows`
 
-`query.auto_limit`（既定 `true`）は Redash 側の「LIMIT 1000」相当の機能
-（`apply_auto_limit`）を呼び出すオプションで、効けばフルスキャン回避や
-転送量削減になる**最適化**にすぎない。以下のケースでは**黙って効かない**。
+`query.auto_limit`（既定 `true`）は Redash 側の「LIMIT 1000」相当の機能を呼び出す
+**最適化**にすぎず、CTE を含むクエリや SQL 以外のデータソースでは**黙って効かない**
+（Oracle / SQL Server では逆にクエリが壊れるため個別に `auto_limit: false` にする）。
 
-- クエリの最後の1文が「LIMIT なしの SELECT」でない場合（CTE を含むクエリ等）
-- SQL 系以外のデータソースの場合
-- Oracle / SQL Server では逆にクエリが壊れることが報告されている
-  （該当するデータソースは `data_sources[].auto_limit: false` で個別に無効化する）
-
-**実際に効く安全装置は `query.max_rows` である。** これは取得後にクライアント側
-（`sumiq` 自身）で判定するため、`auto_limit` が効かない状況でも必ず効く。
-`max_rows` を超えたときの挙動は `query.on_exceed` で決める（既定 `error`）。
-`truncate` を選ぶと `max_rows` 件で黙って切り詰めるため、「切られた結果を
-全件だと誤認する」事故につながりうる。
+**実際に効く安全装置は `query.max_rows` である。** 取得後にクライアント側で判定する
+ため、`auto_limit` が効かない状況でも必ず効く。超過時の挙動は `query.on_exceed`
+で決める（既定 `error`）。`truncate` は部分結果を全件と誤認する事故につながりうる
+ため、必要な場合のみ明示的に選ぶこと。詳細は
+[ADR-0003](docs/adr/0003-config-file-design.md) §10 を参照。
 
 ### 許可リストはセキュリティ境界ではない
 
@@ -190,5 +190,6 @@ CSV 形式の制約であり、`sumiq` 側では回避しない。値が `NULL` 
 
 - [ADR-0003: 設定ファイルの設計](docs/adr/0003-config-file-design.md)
 - [ADR-0004: 出力形式](docs/adr/0004-output-formats.md)
+- [ADR-0009: マスク方法 `null` の強度](docs/adr/0009-mask-null-strength.md)
 - [ADR-0010: 列名パターンの方言](docs/adr/0010-mask-pattern-dialect.md)
 - [ADR-0011: `partial` の `keep` の仕様](docs/adr/0011-partial-keep-options.md)
