@@ -75,29 +75,39 @@ func (s apiKeySource) resolve(opts Options) (string, error) {
 	return runAPIKeyCommand(s.command, s.layer)
 }
 
-// checkAPIKeyFiles は api_key を書いたファイルが git の管理下にないことを確かめる。
+// apiKeySpec は API KEY の指定を書いたファイルと、その項目名。
+type apiKeySpec struct {
+	path  string
+	field string
+}
+
+// checkAPIKeyFiles は API KEY の指定が git の管理下のファイルに無いことを確かめる。
 //
-// 検査するのは「勝ったレイヤ」ではなく api_key を書いた全ファイル。
+// 検査するのは「勝ったレイヤ」ではなく指定を書いた全ファイル。
 // 環境変数で API KEY を渡している人（ADR-0003 §5 の経路1。最も普通の使い方）は
 // ファイルの指定が負けるため、勝者だけを見ると、共有ファイルにコミットされた
 // api_key を素通しすることになる。この検査は事故を防ぐためのものなので、
 // 「その値が実際に使われるか」とは無関係に走らせる。
 //
-// api_key_command は検査しない。秘密そのものではなく秘密の取り方であり、
-// ADR-0003 が共有ファイルに書けるものとして挙げているのはこちら。
-func checkAPIKeyFiles(paths []string, opts Options) error {
-	for _, p := range paths {
-		tracked, err := opts.tracked(p)
+// api_key_command も対象にする。値そのものは秘密でないが、これは
+// 「実行されるコマンド」であり、コミットできると、クローンしたリポジトリの
+// sumiq.yaml に書かれた任意のコマンドが sumiq の起動だけで走ることになる。
+// ADR-0003 が api_key_command を挙げているのも §4 のローカルファイルの
+// スキーマだけで、§3 の共有ファイルには含まれていない。
+func checkAPIKeyFiles(specs []apiKeySpec, opts Options) error {
+	for _, s := range specs {
+		tracked, err := opts.tracked(s.path)
 		if err != nil {
 			return err
 		}
 		if tracked {
-			// ${env:VAR} なら実害は無いが、それも落とす。許すと「git に入っている
-			// api_key は中身を読んで安全か判断する」ことがレビュアーの仕事になる。
-			// 判断を挟まず一律で落とす方が、規約より確実に事故を防ぐ。
-			return fmt.Errorf("%s は git の管理下にあります。redash.api_key をここに書くことはできません。"+
-				"%s に書くか、環境変数 %s か redash.api_key_command を使ってください",
-				p, LocalFileName, EnvAPIKey)
+			// api_key が ${env:VAR} なら実害は無いが、それも落とす。許すと
+			// 「git に入っている api_key は中身を読んで安全か判断する」ことが
+			// レビュアーの仕事になる。判断を挟まず一律で落とす方が、
+			// 規約より確実に事故を防ぐ。
+			return fmt.Errorf("%s は git の管理下にあります。redash.%s をここに書くことはできません。"+
+				"%s に書くか、環境変数 %s を使ってください",
+				s.path, s.field, LocalFileName, EnvAPIKey)
 		}
 	}
 	return nil
@@ -181,9 +191,15 @@ func expandEnvRefs(s string, lookup func(string) (string, bool)) (string, error)
 
 // gitTracked は path が git の管理下にあるかを返す。
 //
-// 判定は git ls-files --error-unmatch に任せる。終了コードは
-// 0 が追跡下、1 が追跡外、128 がリポジトリ外。追跡外とリポジトリ外は
-// どちらも「コミットされていない」なので区別しない。
+// 判定できなかった場合はエラーを返す。追跡外と混同してはならない。
+// git は「そのファイルは追跡外」以外にも 128 で落ちる。他人所有の
+// チェックアウト（detected dubious ownership）、壊れた index、読めない .git。
+// これを全部「追跡外」に倒すと、共有チェックアウトを使う環境でだけ、
+// コミットされた api_key を素通しすることになる。検査が最も要る場所で
+// 検査が消える。
+//
+// リポジトリの外にあるかどうかは git に尋ねず .git を辿って判定する。
+// git のエラーメッセージは翻訳されるため、文言での判別は環境に依存する。
 //
 // git が入っていない環境では追跡外として扱う。判定できないことを理由に
 // 実行を止めると、git を使わない利用者が api_key を書けなくなる。
@@ -193,6 +209,9 @@ func gitTracked(path string) (bool, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return false, fmt.Errorf("%s: 絶対パスに解決できません: %w", path, err)
+	}
+	if _, inRepo := gitRoot(filepath.Dir(abs)); !inRepo {
+		return false, nil
 	}
 
 	// カレントディレクトリではなく対象ファイルの位置を基準に問い合わせる。
@@ -204,15 +223,25 @@ func gitTracked(path string) (bool, error) {
 	// 止める検査が、チェックアウト先の名前次第で開いてしまう。
 	cmd := exec.Command("git", "-C", filepath.Dir(abs), "--literal-pathspecs",
 		"ls-files", "--error-unmatch", "--", abs)
-	if err = cmd.Run(); err == nil {
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err == nil {
 		return true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return false, nil
 	}
 	if errors.Is(err, exec.ErrNotFound) {
 		return false, nil
 	}
-	return false, fmt.Errorf("%s が git の管理下にあるか判定できませんでした: %w", path, err)
+	// --error-unmatch は「追跡外」のときだけ 1 を返す。それ以外の
+	// 終了コードは git 自体が失敗したという意味であり、追跡外ではない。
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	msg := strings.TrimSpace(stderr.String())
+	if msg == "" {
+		return false, fmt.Errorf("%s が git の管理下にあるか判定できませんでした: %w", path, err)
+	}
+	return false, fmt.Errorf("%s が git の管理下にあるか判定できませんでした: %w: %s", path, err, msg)
 }

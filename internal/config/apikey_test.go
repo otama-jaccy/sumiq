@@ -57,9 +57,9 @@ func TestResolve_APIKeyの取得元(t *testing.T) {
 			want:  "$HOME-${FOO}",
 		},
 		{
-			// api_key_command は秘密そのものではないので共有ファイルに書ける。
-			name:  "共有ファイルの api_key_command",
-			files: layerFiles{shared: "version: 1\nredash: {api_key_command: [\"sh\", \"-c\", \"printf from-command\"]}\n"},
+			// git 管理下でなければ読む。管理下かどうかの検査は別のテストで見る。
+			name:  "api_key_command",
+			files: layerFiles{local: "version: 1\nredash: {api_key_command: [\"sh\", \"-c\", \"printf from-command\"]}\n"},
 			want:  "from-command",
 		},
 		{
@@ -84,10 +84,56 @@ func TestResolve_APIKeyの取得元(t *testing.T) {
 			if strings.Contains(tt.files.shared+tt.files.local, "api_key_command") {
 				requireSh(t)
 			}
-			if got := mustResolve(t, tt.files).APIKey; got != tt.want {
-				t.Errorf("APIKey = %q, want %q", got, tt.want)
+			got, err := mustResolve(t, tt.files).APIKey()
+			if err != nil {
+				t.Fatalf("APIKey() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("APIKey() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// 解決は必要になるまで走らせない。設定を表示するだけのコマンドが
+// 1Password のプロンプトで止まるのはおかしい。
+func TestResolve_APIKeyは遅延解決される(t *testing.T) {
+	requireSh(t)
+	dir := t.TempDir()
+	mkGitRoot(t, dir)
+	marker := filepath.Join(dir, "ran")
+	opts := testOptions(dir)
+	writeFile(t, dir, LocalFileName,
+		"version: 1\nredash: {api_key_command: [\"sh\", \"-c\", \"touch "+marker+"; printf k\"]}\n")
+
+	res, err := Resolve(opts)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("Resolve() の時点で api_key_command が実行されている")
+	}
+
+	got, err := res.APIKey()
+	if err != nil {
+		t.Fatalf("APIKey() error = %v", err)
+	}
+	if got != "k" {
+		t.Errorf("APIKey() = %q, want %q", got, "k")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("APIKey() を呼んでも api_key_command が実行されていない")
+	}
+
+	// 2回目は実行し直さない。
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := res.APIKey(); err != nil {
+		t.Fatalf("APIKey() error = %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("APIKey() のたびに api_key_command が実行されている")
 	}
 }
 
@@ -143,7 +189,17 @@ func TestResolve_APIKeyのエラー(t *testing.T) {
 			if tt.needsSh {
 				requireSh(t)
 			}
-			wantError(t, tt.files, tt.wantErr)
+			// 解決は遅延するので、エラーは Resolve ではなく APIKey で出る。
+			res, err := resolveWith(t, tt.files)
+			if err == nil {
+				_, err = res.APIKey()
+			}
+			if err == nil {
+				t.Fatal("APIKey() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("APIKey() error = %q, want に %q を含む", err.Error(), tt.wantErr)
+			}
 		})
 	}
 }
@@ -171,10 +227,19 @@ func TestResolve_git管理下のAPIKeyはエラー(t *testing.T) {
 			wantErr: "git の管理下にあります",
 		},
 		{
-			// 秘密そのものではなく秘密の取り方なので、コミットされていてよい。
-			name:    "api_key_command は git 管理下でも通る",
+			// api_key_command は「実行されるコマンド」。コミットできると、
+			// クローンしたリポジトリの sumiq.yaml に書かれた任意のコマンドが
+			// sumiq の起動だけで走る。ADR-0003 が挙げているのも §4 の
+			// ローカルファイルのスキーマだけで、§3 の共有ファイルには無い。
+			name:    "git 管理下の api_key_command もエラー",
 			files:   layerFiles{shared: "version: 1\nredash: {api_key_command: [\"sh\", \"-c\", \"printf ok\"]}\n"},
 			tracked: true,
+			wantErr: "api_key_command をここに書くことはできません",
+		},
+		{
+			name:    "api_key_command も管理下でなければ通る",
+			files:   layerFiles{local: "version: 1\nredash: {api_key_command: [\"sh\", \"-c\", \"printf ok\"]}\n"},
+			tracked: false,
 		},
 		{
 			name:    "管理下でなければ通る",
@@ -289,8 +354,12 @@ func TestResolve_環境変数のAPIKeyはgit検査の対象外(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if res.APIKey != "from-env" {
-		t.Errorf("APIKey = %q", res.APIKey)
+	got, err := res.APIKey()
+	if err != nil {
+		t.Fatalf("APIKey() error = %v", err)
+	}
+	if got != "from-env" {
+		t.Errorf("APIKey() = %q", got)
 	}
 }
 
@@ -300,8 +369,12 @@ func TestResolve_環境変数のAPIKeyは展開しない(t *testing.T) {
 	res := mustResolve(t, layerFiles{
 		environ: []string{EnvAPIKey + `=abc${env:NOPE}`},
 	})
-	if want := `abc${env:NOPE}`; res.APIKey != want {
-		t.Errorf("APIKey = %q, want %q", res.APIKey, want)
+	got, err := res.APIKey()
+	if err != nil {
+		t.Fatalf("APIKey() error = %v", err)
+	}
+	if want := `abc${env:NOPE}`; got != want {
+		t.Errorf("APIKey() = %q, want %q", got, want)
 	}
 }
 
@@ -316,8 +389,12 @@ func TestResolve_生のAPIKeyはConfigに残らない(t *testing.T) {
 	if res.Config.Redash.APIKeyCommand != nil {
 		t.Errorf("Config.Redash.APIKeyCommand = %v, want nil", res.Config.Redash.APIKeyCommand)
 	}
-	if res.APIKey != "secret" {
-		t.Errorf("APIKey = %q, want %q", res.APIKey, "secret")
+	got, err := res.APIKey()
+	if err != nil {
+		t.Fatalf("APIKey() error = %v", err)
+	}
+	if got != "secret" {
+		t.Errorf("APIKey() = %q, want %q", got, "secret")
 	}
 }
 
@@ -368,6 +445,43 @@ func TestGitTracked(t *testing.T) {
 				t.Errorf("gitTracked(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+// git が失敗したら「追跡外」ではなくエラーを返すこと。
+//
+// git は追跡外（1）以外にも 128 で落ちる。他人所有のチェックアウト
+// （detected dubious ownership）、壊れた index、読めない .git。
+// これを追跡外に倒すと、共有チェックアウトを使う環境でだけ、
+// コミットされた api_key を素通しすることになる。
+func TestGitTracked_判定できなければエラー(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git が無いのでスキップする")
+	}
+
+	dir := t.TempDir()
+	cmd := exec.Command(git, "init", "-q")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	path := writeFile(t, dir, SharedFileName, "version: 1\n")
+
+	// .git は在るが中身が壊れている状態を作る。gitRoot はリポジトリ内と
+	// 判定し、git 自身は 128 で落ちる。
+	if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tracked, err := gitTracked(path)
+	if err == nil {
+		t.Fatalf("gitTracked() error = nil (tracked=%v), want error。"+
+			"判定できないことを追跡外と混同している", tracked)
+	}
+	if tracked {
+		t.Error("gitTracked() = true, want false")
 	}
 }
 

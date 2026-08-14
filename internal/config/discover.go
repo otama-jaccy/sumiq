@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // SharedFileName は <repo>/sumiq.yaml のファイル名。コミットされる共有設定。
@@ -57,10 +58,10 @@ func discover(opts Options) ([]discovered, error) {
 
 	// 共有とローカルは別々に遡る。片方だけがリポジトリルートに置かれ、
 	// もう片方がサブディレクトリにある構成を許すため。
-	if p := searchUp(dir, root, inRepo, SharedFileName); p != "" {
+	for _, p := range searchUp(dir, root, inRepo, SharedFileName) {
 		found = append(found, discovered{layer: LayerShared, path: p})
 	}
-	if p := searchUp(dir, root, inRepo, LocalFileName); p != "" {
+	for _, p := range searchUp(dir, root, inRepo, LocalFileName) {
 		found = append(found, discovered{layer: LayerLocal, path: p})
 	}
 	return found, nil
@@ -81,30 +82,40 @@ func gitRoot(start string) (string, bool) {
 	}
 }
 
-// searchUp は start から root まで遡って name を探し、最初に見つかったものを返す。
+// searchUp は start から root まで遡って name を探し、見つかった全てを
+// 弱い順（遠い方が先）に返す。
 //
-// 近い方が勝つ。同じ名前のファイルが途中の複数階層にあっても、マージはせず
-// 最も近い1枚だけを読む。全部を読むと「どこに何を書いたか」が追えなくなるため。
+// 最も近い1枚だけを読むのでは危険すぎる。モノレポでリポジトリルートに
+// マスクルールを置き、packages/etl/sumiq.yaml に timeout だけを書いた場合、
+// packages/etl から実行するとルートのマスクルールが全部消える。
+// 「近い方が勝つ」は、弱化を黙って通す経路そのものになる。
+//
+// 全部を重ねれば masking.rules は和集合になり、近いファイルはスカラーを
+// 上書きするだけになる。どの階層に何を書いても、マスクは強くしかならない。
 //
 // inRepo が false のとき（git リポジトリの外）は start だけを見る。上限の無いまま
 // 遡ると、ホームディレクトリに置き忘れた sumiq.local.yaml のような無関係な
-// ファイルを黙って読んでしまう。それは api_key_command の実行まで含む。
-func searchUp(start, root string, inRepo bool, name string) string {
+// ファイルを黙って読んでしまう。
+func searchUp(start, root string, inRepo bool, name string) []string {
+	var found []string
 	dir := start
 	for {
 		p := filepath.Join(dir, name)
 		if fileExists(p) {
-			return p
+			found = append(found, p)
 		}
 		if !inRepo || dir == root {
-			return ""
+			break
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return ""
+			break
 		}
 		dir = parent
 	}
+	// 近い順に集めたので、弱い順（遠い方が先）に直す。
+	slices.Reverse(found)
+	return found
 }
 
 // isGitRoot は dir が git のワークツリーのルートかを返す。

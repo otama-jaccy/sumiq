@@ -15,12 +15,15 @@ import (
 //	redash.api_key / api_key_command  組で上書き。同一レイヤで両方指定はエラー
 //	masking.rules                     和集合（追加のみ。削除・上書きは不可）
 //	masking.default_action            厳しくする方向のみ上書き可。緩める指定はエラー
-//	data_sources                      名前で追加。既出の名前の再定義はエラー。由来を保持する
+//	data_sources                      名前で追加。同一ファイル内の重複はエラー。由来を保持する
 //
 // これに加えて、レビューされないレイヤ（ユーザ設定 / ローカル設定）には次の制約がかかる。
 //
 //	masking.rules の method: none     共有ファイルにのみ書ける。それ以外にあればエラー
 //	data_sources の default_action    グローバル既定より緩くできない
+//	data_sources の差し替え           共有設定で定義済みの名前は上書きできない
+//	data_sources の id                共有設定で定義済みの id に別名を付けられない
+//	redash.api_key / api_key_command  git 管理下のファイルに書けない
 //
 // いずれも「ローカル設定でマスクが弱まらないこと」を構造で担保するためのもの。
 // 規則を足すときは、それが単調（fail-closed）かどうかを先に確かめること。
@@ -48,21 +51,30 @@ type Resolved struct {
 	// Redash.APIKey と Redash.APIKeyCommand は意図的に空のまま残す。
 	// 生の指定（${env:VAR} の展開前、経路の優先順位の適用前）を読める場所に
 	// 置くと、解決を経ずにそれを使う実装がいずれ現れるため。API KEY は
-	// APIKey フィールドからのみ取れる。
+	// APIKey メソッドからのみ取れる。
 	Config Config
-	// APIKey は3経路から解決した Redash の API KEY。
-	// どの経路にも指定が無ければ空。実行時に必要かどうかは呼び出し側が判断する。
-	APIKey string
 
-	// keySource は API KEY の指定がどのレイヤ・どのファイル由来かを保持する。
+	// opts は APIKey の遅延解決に要る。
+	opts Options
+	// apiKey / apiKeyErr / apiKeyDone は APIKey の結果を1度だけ計算するためのもの。
+	apiKey     string
+	apiKeyErr  error
+	apiKeyDone bool
+
+	// keySource は API KEY の指定がどのレイヤ由来かを保持する。
 	keySource apiKeySource
-	// apiKeyFiles は redash.api_key を書いた全ファイル。勝ち負けに関係なく
+	// apiKeySpecs は API KEY の指定を書いた全ファイル。勝ち負けに関係なく
 	// git 管理下かを検査するため、負けたレイヤの分も残す。
-	apiKeyFiles []string
+	apiKeySpecs []apiKeySpec
 
-	// dataSourceLayers はデータソース名 → 定義したレイヤ。
+	// dataSourceOrigins はデータソース名 → 定義したレイヤとファイル。
 	// ローカル定義のデータソースを使う実行で警告を出す（#7）ために保持する。
-	dataSourceLayers map[string]Layer
+	//
+	// レイヤだけでなくファイルまで持つのは、1つのレイヤが複数ファイルに
+	// なりうるため。共有設定はリポジトリルートとサブディレクトリの両方に
+	// 置けるので、「同じファイル内の重複」と「近いファイルによる上書き」を
+	// レイヤの比較だけでは区別できない。
+	dataSourceOrigins map[string]layered
 	// files は実際に読んだファイルを弱いレイヤ順に並べたもの。
 	files []SourceFile
 }
@@ -78,6 +90,21 @@ func (r *Resolved) Files() []SourceFile {
 	return append([]SourceFile(nil), r.files...)
 }
 
+// APIKey は Redash の API KEY を解決して返す。どの経路にも指定が無ければ空を返す。
+//
+// 解決を Resolve から遅らせているのは、api_key_command が外部コマンドの実行を
+// 伴うため。設定を表示するだけのコマンドが 1Password のプロンプトで止まるのは
+// おかしい。必要になった時点で初めて実行し、結果は使い回す。
+//
+// 並行に呼ぶことは想定していない。設定の解決はコマンドの開始時に一度行う。
+func (r *Resolved) APIKey() (string, error) {
+	if !r.apiKeyDone {
+		r.apiKey, r.apiKeyErr = r.keySource.resolve(r.opts)
+		r.apiKeyDone = true
+	}
+	return r.apiKey, r.apiKeyErr
+}
+
 // DataSource は name のデータソースと、その定義がどのレイヤ由来かを返す。
 //
 // レイヤを一緒に返すのは、レビューされていない定義（Layer.Reviewed() が false）を
@@ -85,7 +112,7 @@ func (r *Resolved) Files() []SourceFile {
 func (r *Resolved) DataSource(name string) (DataSource, Layer, bool) {
 	for _, ds := range r.Config.DataSources {
 		if ds.Name == name {
-			return ds, r.dataSourceLayers[name], true
+			return ds, r.dataSourceOrigins[name].layer, true
 		}
 	}
 	return DataSource{}, LayerDefault, false
@@ -93,7 +120,7 @@ func (r *Resolved) DataSource(name string) (DataSource, Layer, bool) {
 
 // merge はレイヤを弱い順に畳み込む。layers は弱いレイヤから並んでいること。
 func merge(layers []layered) (*Resolved, error) {
-	res := &Resolved{dataSourceLayers: map[string]Layer{}}
+	res := &Resolved{dataSourceOrigins: map[string]layered{}}
 	var keySrc apiKeySource
 
 	for _, l := range layers {
@@ -107,8 +134,13 @@ func merge(layers []layered) (*Resolved, error) {
 		if err := keySrc.absorb(l); err != nil {
 			return nil, err
 		}
-		if l.cfg.Redash.APIKey != "" && l.path != "" {
-			res.apiKeyFiles = append(res.apiKeyFiles, l.path)
+		if l.path != "" {
+			if l.cfg.Redash.APIKey != "" {
+				res.apiKeySpecs = append(res.apiKeySpecs, apiKeySpec{path: l.path, field: "api_key"})
+			}
+			if len(l.cfg.Redash.APIKeyCommand) > 0 {
+				res.apiKeySpecs = append(res.apiKeySpecs, apiKeySpec{path: l.path, field: "api_key_command"})
+			}
 		}
 		mergeQuery(&res.Config.Query, l.cfg.Query)
 		mergeOutput(&res.Config.Output, l.cfg.Output)
@@ -200,7 +232,7 @@ func mergeMasking(dst *Masking, l layered) error {
 //
 // 名前がぶつかったときの扱いは3通りに分かれる。
 //
-//   - 同じレイヤ内での重複はエラー。1枚のファイルに同じ名前が2回あるのは
+//   - 同じファイル内での重複はエラー。1枚のファイルに同じ名前が2回あるのは
 //     書き間違いであり、黙って後勝ちにすると片方が消えたまま動く
 //   - レビューされる設定（共有）が、レビューされない設定（ユーザ / ローカル）の
 //     定義を上書きするのは許す。これは ADR-0003 §2 の「下が勝つ」そのもので、
@@ -209,20 +241,20 @@ func mergeMasking(dst *Masking, l layered) error {
 //     許すと、レビュー済みの id や default_action をローカルから置き換えられる
 func (r *Resolved) mergeDataSources(l layered) error {
 	for i, ds := range l.cfg.DataSources {
-		prev, exists := r.dataSourceLayers[ds.Name]
+		prev, exists := r.dataSourceOrigins[ds.Name]
 		switch {
 		case !exists:
 			// 新規の名前。
-		case prev == l.layer:
+		case prev.layer == l.layer && prev.path == l.path:
 			return fmt.Errorf("%s: data_sources[%d] (%s): 同じ名前が2回定義されています",
 				l.origin(), i, ds.Name)
-		case prev.Reviewed() && !l.layer.Reviewed():
+		case prev.layer.Reviewed() && !l.layer.Reviewed():
 			return fmt.Errorf("%s: data_sources[%d] (%s): この名前は %s で定義済みです。"+
 				"レビューされない設定から共有設定のデータソースを差し替えることはできません。"+
 				"別の名前で追加してください",
-				l.origin(), i, ds.Name, prev.String())
+				l.origin(), i, ds.Name, prev.origin())
 		}
-		r.dataSourceLayers[ds.Name] = l.layer
+		r.dataSourceOrigins[ds.Name] = l
 		r.setDataSource(ds)
 	}
 	return nil
@@ -249,7 +281,7 @@ func (r *Resolved) setDataSource(ds DataSource) {
 func (r *Resolved) checkDataSourceActions() error {
 	global := r.Config.Masking.DefaultAction
 	for _, ds := range r.Config.DataSources {
-		layer := r.dataSourceLayers[ds.Name]
+		layer := r.dataSourceOrigins[ds.Name].layer
 		if layer.Reviewed() || ds.DefaultAction == "" {
 			continue
 		}
@@ -276,12 +308,12 @@ func (r *Resolved) checkDataSourceActions() error {
 func (r *Resolved) checkDataSourceIDs() error {
 	reviewed := make(map[int]string)
 	for _, ds := range r.Config.DataSources {
-		if r.dataSourceLayers[ds.Name].Reviewed() {
+		if r.dataSourceOrigins[ds.Name].layer.Reviewed() {
 			reviewed[ds.ID] = ds.Name
 		}
 	}
 	for _, ds := range r.Config.DataSources {
-		layer := r.dataSourceLayers[ds.Name]
+		layer := r.dataSourceOrigins[ds.Name].layer
 		if layer.Reviewed() {
 			continue
 		}

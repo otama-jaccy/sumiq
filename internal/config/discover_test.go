@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeFile は dir/name に内容を書き、そのパスを返す。途中のディレクトリも作る。
@@ -145,20 +146,57 @@ func TestDiscover_git_root_より上は見ない(t *testing.T) {
 	}
 }
 
-// 途中の複数階層に同じ名前があったら、近い方だけを読む。
-func TestDiscover_近い方が勝つ(t *testing.T) {
+// 途中の複数階層に同じ名前があったら、全部を弱い順（遠い方が先）に読む。
+//
+// 近い1枚だけを読むと、モノレポでサブディレクトリに sumiq.yaml を置いた
+// 瞬間にルートのマスクルールが全部消える。近さで勝敗を決めるのは、
+// 弱化を黙って通す経路になる。
+func TestDiscover_遡って見つけた全てを弱い順に読む(t *testing.T) {
 	root := t.TempDir()
 	mkGitRoot(t, root)
-	writeFile(t, root, SharedFileName, "version: 1\n")
-	sub := filepath.Join(root, "sub")
+	rootPath := writeFile(t, root, SharedFileName, "version: 1\n")
+	sub := filepath.Join(root, "a", "b")
 	nearPath := writeFile(t, sub, SharedFileName, "version: 1\n")
 
 	got, err := discover(testOptions(sub))
 	if err != nil {
 		t.Fatalf("discover() error = %v", err)
 	}
-	if len(got) != 1 || got[0].path != nearPath {
-		t.Errorf("discover() = %+v, want %s", got, nearPath)
+	if len(got) != 2 || got[0].path != rootPath || got[1].path != nearPath {
+		t.Fatalf("discover() = %+v, want [%s %s]", got, rootPath, nearPath)
+	}
+}
+
+// サブディレクトリの共有設定は、ルートのマスクルールを消さずに足すだけ。
+func TestResolve_サブディレクトリの共有設定はルートのルールを消さない(t *testing.T) {
+	root := t.TempDir()
+	mkGitRoot(t, root)
+	writeFile(t, root, SharedFileName, `
+version: 1
+masking:
+  default_action: redact
+  rules:
+    - patterns: ["*email*"]
+      method: drop
+`)
+	sub := filepath.Join(root, "packages", "etl")
+	writeFile(t, sub, SharedFileName, "version: 1\nredash: {timeout: 600s}\n")
+
+	res, err := Resolve(testOptions(sub))
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got := res.Config.Masking.DefaultAction; got != ActionRedact {
+		t.Errorf("default_action = %q, want %q。ルートの設定が消えている", got, ActionRedact)
+	}
+	if n := len(res.Config.Masking.Rules); n != 1 {
+		t.Fatalf("rules = %d件, want 1件。ルートのマスクルールが消えている", n)
+	}
+	if got := res.Config.Masking.Rules[0].Method; got != MaskDrop {
+		t.Errorf("rules[0].method = %q, want %q", got, MaskDrop)
+	}
+	if got := res.Config.Redash.Timeout.Duration(); got != 600*time.Second {
+		t.Errorf("timeout = %v, want 600s。近いファイルのスカラーが効いていない", got)
 	}
 }
 
