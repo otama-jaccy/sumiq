@@ -1,0 +1,95 @@
+# sumiq.yaml — 共有設定のサンプル。
+#
+# このファイルは git にコミットする。API KEY のような秘密は書けない
+# （書くとロード時にエラーで停止する。README.md「API KEY」節を参照）。
+#
+# 使い方:
+#   cp sumiq.yaml.example sumiq.yaml
+# としてから、自分のチームの Redash / データソース / マスク方針に書き換える。
+#
+# マスクルールはこのファイル（共有設定）にのみ書き、レビューを通すこと。
+# sumiq.local.yaml から共有ルールを弱めることはできない（追加のみ許可）。
+# 詳細は docs/adr/0003-config-file-design.md を参照。
+
+version: 1
+
+redash:
+  endpoint: https://redash.example.com
+  # ジョブ完了を待つ上限。ポーリングは poll_interval 間隔で行う。
+  timeout: 300s
+  poll_interval: 1s
+  # api_key はここに書かない。sumiq.local.yaml か環境変数 SUMIQ_REDASH_API_KEY を使う。
+
+# sumiq query -d <name> の <name> で選べるデータソース。
+# CLI は名前のみ受け付け、数値 ID を直接指定することはできない。
+data_sources:
+  - name: analytics
+    id: 3
+    description: "本番リードレプリカ。個人情報を含むため allowlist 運用にする"
+    # default_action: redact にすると、下の masking.rules にマッチしなかった列も
+    # 一律 **** になる（allowlist 運用）。method: none を書いた列だけが素通しになる。
+    default_action: redact
+
+  - name: sandbox
+    id: 7
+    description: "検証用データソース。個人情報を含まない"
+    # データソース単位の auto_limit 上書きの例（README.md「auto_limit」節を参照）。
+    auto_limit: false
+
+query:
+  # auto_limit は最適化、max_rows が実際の安全装置（README.md「auto_limit」節を参照）。
+  auto_limit: true
+  max_rows: 1000
+  # max_rows 超過時の挙動。truncate は部分結果を全件と誤認する事故につながるため、
+  # 必要な場合のみ明示的に選ぶこと。
+  on_exceed: error
+
+masking:
+  # このファイルにマッチしなかった列の既定の扱い。
+  # none: マッチした列だけマスクする（denylist）。redact: マッチしなかった列も **** にする（allowlist）。
+  # データソース単位で上書きできる（上の data_sources[].default_action）。
+  # ローカル設定からはここより緩い値に上書きできない。
+  default_action: none
+
+  rules:
+    # パターンは既定でグロブ（大文字小文字を無視、* は0文字以上の任意の並び、? は任意の1文字、
+    # / や改行もまたぐ）。標準の path.Match とは方言が異なり、[ を含むパターンはエラーになる
+    # （文字クラスとして読むか列名の文字として読むか曖昧なため）。列名の一部を選びたい場合は
+    # regex: 接頭辞で正規表現に切り替える。詳細は docs/adr/0010-mask-pattern-dialect.md を参照。
+
+    - patterns: ["*email*"]
+      method: partial
+      keep: domain
+      note: "ドメインのみ残す。流入元の切り分けに使うため"
+
+    - patterns: ["*phone*", "*tel*"]
+      # グロブは列名全体に一致する必要があるため "*tel" だと "tel_no" のような
+      # 列にはマッチしない。"*tel*" にして tel を含む列名を広く拾う
+      # （多少広すぎても、過剰にマスクする側の食い違いなので安全側に倒れる）。
+      method: redact
+      note: "電話番号は全件個人特定情報のため一律redact"
+
+    - patterns: ["user_id", "customer_id"]
+      method: hash
+      note: "同一実行内でのみ集計・JOINしたい。実行をまたいだ突き合わせは仕様上不可（README.md「hashのsalt」節を参照）"
+
+    - patterns: ["regex:^(first|last)_name$"]
+      method: drop
+      note: "分析に使わないため列ごと出力しない"
+
+    - patterns: ["memo", "note"]
+      method: redact
+      note: "自由記述は個人情報混入のリスクが高いため一律redact（analyticsのみ）"
+      data_sources: [analytics]
+
+    # allowlist 運用（analytics の default_action: redact）で、集計に必要な列だけを
+    # 明示的に通す例。method: none は共有ファイルにのみ書ける。regex: は使えないため
+    # 通したい列は1つずつグロブで挙げる（docs/adr/0010-mask-pattern-dialect.md §「regex: は
+    # method: none には書けない」を参照）。
+    - patterns: ["id", "created_at", "status"]
+      method: none
+      note: "集計に必須かつ個人を特定できない列。allowlistに追加済み"
+
+output:
+  # table / json / csv。CLI の --format で毎回上書きできる（優先順位は CLI 引数が最も強い）。
+  format: table
