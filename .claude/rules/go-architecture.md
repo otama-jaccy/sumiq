@@ -15,9 +15,15 @@ cmd/sumiq/main.go     エントリポイント。依存の組み立てと os.Exi
 internal/cli/         コマンド定義。kong を知る唯一の層
 internal/app/         ドメインロジック。CLI フレームワークを import しない
 internal/config/      設定の読み込み
+internal/redash/      Redash API クライアント
 ```
 
 依存は `cmd → internal/cli → internal/app` の一方向。逆流させない。
+
+`internal/config` と `internal/redash` は `internal/app` から使う外側の部品であり、
+**互いを import しない。** 設定のレイヤ構造は Redash の都合と無関係で、
+持ち込むと API クライアントを設定ファイル抜きにテストできなくなる。
+必要な値は呼び出し側が詰め替えて渡す。
 
 ## 禁止
 
@@ -119,6 +125,49 @@ return false, fmt.Errorf("判定できませんでした: %w", err)
 ゼロ値を意味のある値として受け取りたい場合はポインタで受ける（`*bool` の
 `auto_limit` がその例）。ポインタにしないなら、ゼロ値の指定を検証で弾く。
 
+### JSON の数値を `any` で受けるなら `UseNumber` を立てる
+
+`encoding/json` の既定では `any` に入る数値がすべて `float64` になる。
+`sumiq` が運ぶのは `user_id` のような ID であり、**2^53 を超えた時点で
+静かに桁が落ちる。** 出力もマスク後のハッシュも元の値と対応しなくなる。
+
+```go
+dec := json.NewDecoder(r)
+dec.UseNumber()   // これが無いと 9007199254740993 が 9007199254740992 になる
+```
+
+型を決めずに受ける場所（クエリ結果のセル等）では必ず立てる。
+立てたことに依存するコメントを書くなら、**どの関数が立てているかを名指しする。**
+
+### 外部から来た値を `url.JoinPath` にそのまま渡さない
+
+`url.JoinPath` は要素の中の `/` と `%` をエスケープせず、`..` を辿って詰める。
+
+```go
+u.JoinPath("api", "jobs", "../../evil")   // => /evil
+u.JoinPath("api", "jobs", "a%2Fb")        // => /api/jobs/a%2Fb → サーバ側で a/b
+```
+
+応答から受け取った ID をパス要素にする前に、`/` `%` と `.` `..` を弾く。
+自分で組み立てた数値や定数はそのままでよい。
+
+`url.URL` の正規化で `RawPath` を消すのも同じ種類の事故になる。消すと
+`EscapedPath` が `Path` を再エンコードし、`%2F` が本物の区切りに変わる。
+
+### リダイレクトを追う前に、認証情報の行き先を確かめる
+
+`http.Client` の既定はリダイレクトを追う。`Authorization` を転送するかの
+判定は**ホスト名の比較だけ**で、スキームもポートも見ない
+（`shouldCopyHeaderOnRedirect` → `isDomainOrSubdomain`）。
+`https://host` から `http://host` へのリダイレクトで、秘密が平文で流れる。
+
+加えて Go は 301 / 302 / 303 で POST を GET に落とす。追う必要が無いなら
+`CheckRedirect` で拒否する。
+
+`CheckRedirect` が返したエラーは `*url.Error` に包まれ、その URL フィールドに
+**リダイレクト先がクエリごと**入る。文言側で URL を伏せても包みから出るため、
+専用の型を返して呼び出し側で包みを捨てる。
+
 ### 外部コマンドを起動するなら `WaitDelay` を設定する
 
 `exec.CommandContext` が kill するのは直接の子だけである。孫が標準出力の
@@ -147,6 +196,25 @@ cmd.WaitDelay = 5 * time.Second   // これが無いと締切は守られない
 **`nil` と空スライスを同じ扱いにしない。** 同じにすると、実行環境に変数が
 あるかどうかでテストの結果が変わる。
 
+### 応答を止めるテストサーバは、締切と競争させない
+
+`httptest` のハンドラを止めて打ち切りを再現するとき、2つ踏みやすい。
+
+**`t.Cleanup` は後入れ先出しで走る。** `srv.Close()` は実行中のハンドラの
+終了を待つため、ハンドラを解放する `close(ch)` を先に登録すると、
+`Close()` が待ち、ハンドラは `ch` を待って**テストごと止まる。**
+
+```go
+srv := httptest.NewServer(h)
+t.Cleanup(srv.Close)              // 先に登録 = 後に走る
+t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
+```
+
+**どの段で締切が切れるかを壁時計に賭けない。** 前の段が実行環境の負荷で
+遅れると、狙っていない段で打ち切られて別の理由で落ちる。止めたい段だけを
+無限に待たせ、締切はそこでしか切れない長さにする。到達したことは
+チャネルで確認する。
+
 ### 安全側の検査には、壊して落ちることを確かめたテストを置く
 
 「弱化を防ぐ」種類の検査は、実装を1行変えれば黙って無効化できる。
@@ -164,6 +232,8 @@ cmd.WaitDelay = 5 * time.Second   // これが無いと締切は守られない
 - [ADR-0002](../../docs/adr/0002-adopt-kong-as-cli-framework.md): CLI フレームワークに kong を採用
 - [ADR-0007](../../docs/adr/0007-layered-merge-guards.md): レイヤードマージの安全ガード
   （上の「安全側の検査」「ゼロ値」「`WaitDelay`」の背景）
+- [ADR-0008](../../docs/adr/0008-redash-client-error-classification.md): Redash クライアントの
+  エラー分類と応答の読み方（上の「`UseNumber`」「`url.JoinPath`」「リダイレクト」の背景）
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 

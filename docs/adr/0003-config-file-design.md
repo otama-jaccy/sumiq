@@ -2,7 +2,7 @@
 
 - ステータス: Accepted
 - 日付: 2026-08-14
-- 関連: [ADR-0001](./0001-layered-cli-architecture.md), [ADR-0002](./0002-adopt-kong-as-cli-framework.md)
+- 関連: [ADR-0001](./0001-layered-cli-architecture.md), [ADR-0002](./0002-adopt-kong-as-cli-framework.md), [ADR-0008](./0008-redash-client-error-classification.md)
 
 ## コンテキスト
 
@@ -253,7 +253,7 @@ Oracle / SQL Server は `apply_auto_limit` でクエリが壊れるため、該�
 - ~~出力形式（table / json / csv）とその既定値~~ → [ADR-0004](./0004-output-formats.md) で決定
 - `partial` の `keep` オプションの詳細仕様
 - 接続先が増えた場合のプロファイル機能（endpoint 自体を切り替える必要が出たとき）
-- クエリ結果のキャッシュ（`max_age` の扱い）
+- ~~クエリ結果のキャッシュ（`max_age` の扱い）~~ → [ADR-0008](./0008-redash-client-error-classification.md) §5 で決定（キャッシュは使わず `max_age: 0` 固定）
 
 ## 参考
 
