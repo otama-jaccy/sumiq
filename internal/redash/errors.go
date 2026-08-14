@@ -1,6 +1,7 @@
 package redash
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -104,6 +105,15 @@ type TimeoutError struct {
 	// JobID は PhaseSubmit では空。まだジョブ ID を受け取っていない。
 	JobID   string
 	Timeout time.Duration
+}
+
+// Unwrap は context.DeadlineExceeded を返す。
+//
+// 打ち切りの理由は締切超過そのものなので、errors.Is で拾えるようにしておく。
+// これが無いと、終了コードを分けたい internal/cli が型アサーションを
+// 強いられる。段ごとの説明が要るときだけ errors.As で TimeoutError を取る。
+func (e *TimeoutError) Unwrap() error {
+	return context.DeadlineExceeded
 }
 
 func (e *TimeoutError) Error() string {

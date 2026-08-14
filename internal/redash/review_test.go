@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -131,9 +132,12 @@ func TestTimeoutBeforeSubmit(t *testing.T) {
 // 「クエリを軽くしてください」はどちらも的外れになる。
 func TestTimeoutDuringFetch(t *testing.T) {
 	block := make(chan struct{})
+	reachedFetch := make(chan struct{})
+	var once sync.Once
 
 	f := defaultFake(t)
 	f.result = func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(reachedFetch) })
 		select {
 		case <-block:
 		case <-r.Context().Done():
@@ -144,11 +148,14 @@ func TestTimeoutDuringFetch(t *testing.T) {
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(block) })
 
+	// 締切を壁時計で競争させない。投入と1回のポーリングはローカルの
+	// httptest 相手で 1ms 程度、取得は永久に返らないので、締切は必ず
+	// 取得の段で切れる。実行環境が詰まっていても前の段には落ちない。
 	c, err := New(Options{
 		Endpoint:     srv.URL,
 		APIKey:       testAPIKey,
-		Timeout:      120 * time.Millisecond,
-		PollInterval: 5 * time.Millisecond,
+		Timeout:      time.Second,
+		PollInterval: time.Millisecond,
 		HTTPClient:   srv.Client(),
 	})
 	if err != nil {
@@ -156,6 +163,14 @@ func TestTimeoutDuringFetch(t *testing.T) {
 	}
 
 	_, err = c.Execute(context.Background(), testQuery())
+
+	// 取得の段に届いていなければ、このテストは狙った経路を見ていない。
+	select {
+	case <-reachedFetch:
+	default:
+		t.Fatal("取得の段に到達しませんでした")
+	}
+
 	var timeoutErr *TimeoutError
 	if !errors.As(err, &timeoutErr) {
 		t.Fatalf("エラーの型 = %T, want *TimeoutError: %v", err, err)

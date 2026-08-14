@@ -160,8 +160,13 @@ func parseEndpoint(endpoint string) (*url.URL, error) {
 	}
 
 	// 以降 JoinPath で組み立てるため、末尾のスラッシュだけ落として正規化する。
+	//
+	// RawPath は消さない。消すと EscapedPath が Path を再エンコードするため、
+	// パスに含まれた %2F が本物の区切りに変わる（実測:
+	// https://h/re%2Fdash が /re/dash になり、別のパスへ投げることになる）。
+	// 末尾スラッシュを落とすだけなら RawPath は Path の妥当なエンコードで
+	// なくなり、EscapedPath が Path から組み直すので触る必要がない。
 	u.Path = strings.TrimSuffix(u.Path, "/")
-	u.RawPath = ""
 	return u, nil
 }
 
