@@ -16,6 +16,7 @@ internal/cli/         コマンド定義。kong を知る唯一の層
 internal/app/         ドメインロジック。CLI フレームワークを import しない
 internal/config/      設定の読み込み
 internal/redash/      Redash API クライアント
+internal/mask/        マスクルールの適用
 ```
 
 依存は `cmd → internal/cli → internal/app` の一方向。逆流させない。
@@ -24,6 +25,10 @@ internal/redash/      Redash API クライアント
 **互いを import しない。** 設定のレイヤ構造は Redash の都合と無関係で、
 持ち込むと API クライアントを設定ファイル抜きにテストできなくなる。
 必要な値は呼び出し側が詰め替えて渡す。
+
+`internal/mask` はその2つを import する（ルールの型は `config`、結果の型は `redash`）。
+向きは一方向で、`config` と `redash` は `mask` を知らない。**ここで型を詰め替えない**のは、
+変換そのものがルールや列を落としうる経路になるため。落ちたことは出力を見ても分からない。
 
 ## 禁止
 
@@ -168,6 +173,45 @@ u.JoinPath("api", "jobs", "a%2Fb")        // => /api/jobs/a%2Fb → サーバ側
 **リダイレクト先がクエリごと**入る。文言側で URL を伏せても包みから出るため、
 専用の型を返して呼び出し側で包みを捨てる。
 
+### 列名の照合に `path.Match` / `filepath.Match` を使わない
+
+どちらも `/` を区切りとして扱い、`*` と `?` が `/` をまたがない。加えて `\` を
+打ち消しとして読む。
+
+```go
+path.Match("*", "payload/user/email")        // => false
+path.Match(`payload\user`, `payload\user`)   // => false（\u が u に化ける）
+```
+
+列名は `sumiq` が決めるものではなく、`SELECT ... AS "payload/user/email"` と
+書けばどうにでもなる。**`patterns: ["*"]` が列にマッチしない状態は、マスクが
+黙って外れることを意味する。** `filepath.Match` は Windows で `\` の扱いが変わり、
+同じ設定が実行環境で違う結果になる。
+
+パターンは正規表現に直して照合する（[ADR-0010](../../docs/adr/0010-mask-pattern-dialect.md)）。
+
+同じ理由で、**照合器を組み立てられないパターンはエラーにする。**「何にもマッチしない
+パターン」として読み飛ばすと、そのルールが消えたまま実行される。
+
+### 値の一部を残す処理は「残す条件」として書く
+
+マスクで値の一部を残すとき、条件を満たさない入力は**全て伏せる側に倒す。**
+残す量を入力に合わせて調整しない。
+
+```go
+// 悪い: 残す指定が値より長いと、値がそのまま出る
+if prefix < len(rs) { ... }
+return s
+
+// 良い: 残せないなら全部伏せる
+if prefix >= len(rs) || suffix >= len(rs) || prefix+suffix >= len(rs) {
+    return redacted
+}
+```
+
+`prefix + suffix` だけを見ると、極端な値で桁溢れして負になり検査をすり抜ける。
+片方ずつ先に比べること。
+
 ### 外部コマンドを起動するなら `WaitDelay` を設定する
 
 `exec.CommandContext` が kill するのは直接の子だけである。孫が標準出力の
@@ -234,6 +278,11 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
   （上の「安全側の検査」「ゼロ値」「`WaitDelay`」の背景）
 - [ADR-0008](../../docs/adr/0008-redash-client-error-classification.md): Redash クライアントの
   エラー分類と応答の読み方（上の「`UseNumber`」「`url.JoinPath`」「リダイレクト」の背景）
+- [ADR-0009](../../docs/adr/0009-mask-null-strength.md): マスク方法 `null` の強度
+- [ADR-0010](../../docs/adr/0010-mask-pattern-dialect.md): 列名パターンの方言
+  （上の「`path.Match` を使わない」の背景）
+- [ADR-0011](../../docs/adr/0011-partial-keep-options.md): `partial` の `keep` の仕様
+  （上の「残す条件として書く」の背景）
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 
