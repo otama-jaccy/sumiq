@@ -106,14 +106,94 @@ func TestTimeoutBeforeSubmit(t *testing.T) {
 	if !errors.As(err, &timeoutErr) {
 		t.Fatalf("エラーの型 = %T, want *TimeoutError: %v", err, err)
 	}
+	if timeoutErr.Phase != PhaseSubmit {
+		t.Errorf("Phase = %q, want %q", timeoutErr.Phase, PhaseSubmit)
+	}
 	if timeoutErr.JobID != "" {
 		t.Errorf("JobID = %q, want 空", timeoutErr.JobID)
 	}
 	if strings.Contains(err.Error(), "実行され続けます") {
-		t.Errorf("投入されていないジョブが動いていると伝えています: %v", err)
+		t.Errorf("ジョブが動いていると言い切っています: %v", err)
 	}
-	if !strings.Contains(err.Error(), "投入されていません") {
-		t.Errorf("クエリが投入されていないことが伝わりません: %v", err)
+	// POST が届いてジョブが積まれた可能性は残る。「投入されていません」と
+	// 言い切ると、実際には走っているクエリを放置してよいと誤解させる。
+	if strings.Contains(err.Error(), "投入されていません") {
+		t.Errorf("投入されていないと言い切っています: %v", err)
+	}
+	if !strings.Contains(err.Error(), "分かりません") {
+		t.Errorf("投入されたか不明であることが伝わりません: %v", err)
+	}
+}
+
+// TestTimeoutDuringFetch は結果取得中の打ち切りで誤った助言をしないことを見る。
+//
+// この段まで来たジョブは完了している。「ジョブは実行され続けます」
+// 「クエリを軽くしてください」はどちらも的外れになる。
+func TestTimeoutDuringFetch(t *testing.T) {
+	block := make(chan struct{})
+
+	f := defaultFake(t)
+	f.result = func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-block:
+		case <-r.Context().Done():
+		}
+	}
+
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(block) })
+
+	c, err := New(Options{
+		Endpoint:     srv.URL,
+		APIKey:       testAPIKey,
+		Timeout:      120 * time.Millisecond,
+		PollInterval: 5 * time.Millisecond,
+		HTTPClient:   srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = c.Execute(context.Background(), testQuery())
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("エラーの型 = %T, want *TimeoutError: %v", err, err)
+	}
+	if timeoutErr.Phase != PhaseFetch {
+		t.Errorf("Phase = %q, want %q", timeoutErr.Phase, PhaseFetch)
+	}
+	if timeoutErr.JobID != "job-1" {
+		t.Errorf("JobID = %q, want job-1", timeoutErr.JobID)
+	}
+	if strings.Contains(err.Error(), "実行され続けます") {
+		t.Errorf("完了したジョブが動いていると伝えています: %v", err)
+	}
+	if strings.Contains(err.Error(), "クエリを軽く") {
+		t.Errorf("転送が遅いのにクエリを軽くしろと言っています: %v", err)
+	}
+	if !strings.Contains(err.Error(), "結果の取得") {
+		t.Errorf("結果取得の段だと伝わりません: %v", err)
+	}
+}
+
+// TestClipsLongJobID は長いジョブ ID をそのまま吐かないことを見る。
+func TestClipsLongJobID(t *testing.T) {
+	long := strings.Repeat("a", 5000) + "/evil"
+
+	f := defaultFake(t)
+	f.submit = respond(http.StatusOK, fmt.Sprintf(
+		`{"job":{"id":%s,"status":1,"error":"","query_result_id":null}}`, strconv.Quote(long)))
+	f.jobs = nil
+	f.result = nil
+	c := start(t, f, nil)
+
+	_, err := c.Execute(context.Background(), testQuery())
+	if err == nil {
+		t.Fatal("エラーになりませんでした")
+	}
+	if n := len([]rune(err.Error())); n > maxErrorMessageRunes+200 {
+		t.Errorf("エラー文の長さ = %d, 切り詰められていません", n)
 	}
 }
 

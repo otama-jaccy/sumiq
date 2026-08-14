@@ -13,8 +13,10 @@ import (
 //	JobError     ジョブが失敗した。SQL のエラーもここに入る
 //	TimeoutError timeout 以内にジョブが終わらなかった
 //
-// どのエラーにも API KEY を載せない。Redash の応答を転記する箇所は
-// すべて Client.scrub を通す。
+// どのエラーにも API KEY を載せない。Redash の応答を転記するときは、
+// 秘密が混ざりうる経路（HTTP の本文とジョブの error）を Client.cleanMessage に、
+// それ以外（ジョブ ID・列名）を clipMessage に通す。前者は伏せ字と
+// 長さの上限の両方、後者は長さの上限だけを効かせる。
 
 // AuthError は認証・権限の失敗。
 //
@@ -80,27 +82,50 @@ func (e *JobError) Error() string {
 	return fmt.Sprintf("Redash のクエリ実行に失敗しました (ジョブ %s): %s", e.JobID, e.Message)
 }
 
-// TimeoutError は timeout 以内に処理が終わらなかったことを表す。
+// Phase は3段構えのどこで打ち切ったか。
 //
-// JobID が空でなければジョブは Redash 側で動き続けている。sumiq は待つのを
-// やめるだけで、クエリを止めるわけではない。
+// 段によってジョブの状態も、利用者が取るべき手も違う。1つの文言に
+// まとめると、どれかの段で必ず嘘になる。
+type Phase string
+
+const (
+	// PhaseSubmit はジョブ投入（POST /api/query_results）。
+	PhaseSubmit Phase = "submit"
+	// PhaseWait はジョブの完了待ち（GET /api/jobs/{id}）。
+	PhaseWait Phase = "wait"
+	// PhaseFetch は結果の取得（GET /api/query_results/{id}）。
+	PhaseFetch Phase = "fetch"
+)
+
+// TimeoutError は timeout 以内に処理が終わらなかったことを表す。
 type TimeoutError struct {
-	// JobID はジョブ投入前に打ち切った場合は空。
+	// Phase は打ち切った段。
+	Phase Phase
+	// JobID は PhaseSubmit では空。まだジョブ ID を受け取っていない。
 	JobID   string
 	Timeout time.Duration
 }
 
 func (e *TimeoutError) Error() string {
-	// ジョブ投入前に打ち切った場合、Redash には何も残っていない。
-	// 「ジョブは動き続けます」と伝えると原因を見誤る。応答が無いのは
-	// 接続の問題であって、クエリの重さではない。
-	if e.JobID == "" {
+	switch e.Phase {
+	case PhaseSubmit:
+		// 応答が返らなかっただけで、POST が Redash に届いてジョブが
+		// 積まれた可能性は残る。「投入されていません」と言い切ると、
+		// 実際には走っているクエリを止めなくてよいと誤解させる。
 		return fmt.Sprintf("Redash が %s 以内に応答しませんでした。"+
-			"クエリは投入されていません。redash.endpoint と接続を確認してください", e.Timeout)
+			"クエリが投入されたかどうかは分かりません。redash.endpoint と接続を確認してください",
+			e.Timeout)
+	case PhaseFetch:
+		// ここまで来たジョブは完了している。クエリを軽くしろという助言は
+		// 的外れで、時間がかかっているのは結果の転送。
+		return fmt.Sprintf("Redash のクエリは完了しましたが、結果の取得が %s 以内に"+
+			"終わりませんでした (ジョブ %s)。redash.timeout を延ばすか、"+
+			"取得する行数を減らしてください", e.Timeout, e.JobID)
+	default:
+		return fmt.Sprintf("Redash のクエリが %s 以内に終わりませんでした (ジョブ %s)。"+
+			"ジョブは Redash 側で実行され続けます。redash.timeout を延ばすか、クエリを軽くしてください",
+			e.Timeout, e.JobID)
 	}
-	return fmt.Sprintf("Redash のクエリが %s 以内に終わりませんでした (ジョブ %s)。"+
-		"ジョブは Redash 側で実行され続けます。redash.timeout を延ばすか、クエリを軽くしてください",
-		e.Timeout, e.JobID)
 }
 
 // scrub は文字列から API KEY を取り除く。

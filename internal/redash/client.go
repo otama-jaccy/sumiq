@@ -68,7 +68,8 @@ func New(opts Options) (*Client, error) {
 		apiKey:       opts.APIKey,
 		timeout:      opts.Timeout,
 		pollInterval: opts.PollInterval,
-		httpClient:   opts.HTTPClient,
+		// httpClient は opts.HTTPClient をそのままは使わない。
+		// リダイレクトを拒否する設定を足した複製を下で入れる。
 	}
 	if c.timeout <= 0 {
 		c.timeout = DefaultTimeout

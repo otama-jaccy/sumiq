@@ -16,8 +16,8 @@ type Column struct {
 //
 // 各要素は encoding/json が返す値だが、数値は float64 ではなく json.Number。
 // user_id のような 2^53 を超えうる整数を float64 に通すと桁が落ち、
-// 出力もマスク後のハッシュも元の値と対応しなくなる。これは decodeJSON が
-// UseNumber を立てていることで成り立っている。
+// 出力もマスク後のハッシュも元の値と対応しなくなる。これは応答を読む
+// Client.do が json.Decoder.UseNumber を立てていることで成り立っている。
 type Row []any
 
 // Result はクエリ1回分の結果。
@@ -65,7 +65,8 @@ func (qr *queryResult) toResult() (*Result, error) {
 		// その保証が崩れているときで、そのまま進めると同じ値を2列に複製して
 		// 出すことになる。読み手にはそれが起きたと分からない。
 		if _, dup := index[c.Name]; dup {
-			return nil, fmt.Errorf("Redash の応答に同じ列名が2つあります: %q (結果 %d)", c.Name, qr.ID)
+			return nil, fmt.Errorf("Redash の応答に同じ列名が2つあります: %q (結果 %d)",
+				clipMessage(c.Name), qr.ID)
 		}
 		index[c.Name] = i
 	}
