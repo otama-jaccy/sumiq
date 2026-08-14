@@ -150,9 +150,9 @@ func (e *Engine) maskValue(m columnMask, v any) any {
 	case config.MaskRedact:
 		return redacted
 	case config.MaskHash:
-		return e.hash(renderValue(v))
+		return e.hash(RenderValue(v))
 	case config.MaskPartial:
-		return applyPartial(renderValue(v), m.partial)
+		return applyPartial(RenderValue(v), m.partial)
 	}
 	// drop は Apply が列ごと落とすためここには来ない。未知の method も
 	// New が弾く。どちらにせよ素通りさせず伏せる。
@@ -234,12 +234,13 @@ func keepEnds(s string, prefix, suffix int) string {
 	return string(rs[:prefix]) + redacted + string(rs[len(rs)-suffix:])
 }
 
-// renderValue は値をマスクに掛ける前の文字列にする。
+// RenderValue は値を文字列にする。マスク（hash / partial）が掛ける前の下ごしらえと、
+// internal/output がマスクされていない値を table / csv に書くときの両方で使う。
 //
 // 数値が json.Number で来るのは redash.Client が json.Decoder の UseNumber を
 // 立てているため。float64 に落ちると 2^53 を超える id の桁が落ち、
 // 同じ値が同じハッシュにならなくなる。
-func renderValue(v any) string {
+func RenderValue(v any) string {
 	switch x := v.(type) {
 	case nil:
 		return ""

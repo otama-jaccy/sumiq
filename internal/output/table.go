@@ -1,13 +1,12 @@
 package output
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/otama-jaccy/sumiq/internal/mask"
 	"github.com/otama-jaccy/sumiq/internal/redash"
 )
 
@@ -33,22 +32,14 @@ func renderTable(out io.Writer, res *redash.Result, tty bool) error {
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', flags)
 
-	header := make([]string, len(res.Columns))
-	for i, c := range res.Columns {
-		header[i] = c.Name
-	}
-	if _, err := fmt.Fprintln(tw, strings.Join(header, "\t")); err != nil {
+	if _, err := fmt.Fprintln(tw, strings.Join(columnNames(res.Columns), "\t")); err != nil {
 		return err
 	}
 
+	cells := make([]string, len(res.Columns))
 	for _, row := range res.Rows {
-		cells := make([]string, len(res.Columns))
 		for i := range cells {
-			var v any
-			if i < len(row) {
-				v = row[i]
-			}
-			cells[i] = tableCell(v)
+			cells[i] = tableCell(cellAt(row, i))
 		}
 		if _, err := fmt.Fprintln(tw, strings.Join(cells, "\t")); err != nil {
 			return err
@@ -67,18 +58,5 @@ func tableCell(v any) string {
 	if v == nil {
 		return "NULL"
 	}
-	return renderScalar(v)
-}
-
-// renderScalar は nil 以外の値を文字列にする。table と csv で共有する。
-func renderScalar(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case json.Number:
-		return x.String()
-	case bool:
-		return strconv.FormatBool(x)
-	}
-	return fmt.Sprintf("%v", v)
+	return mask.RenderValue(v)
 }

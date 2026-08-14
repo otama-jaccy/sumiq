@@ -15,7 +15,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/otama-jaccy/sumiq/internal/config"
 	"github.com/otama-jaccy/sumiq/internal/mask"
 	"github.com/otama-jaccy/sumiq/internal/redash"
 )
@@ -76,20 +75,9 @@ func Render(out, errW io.Writer, format Format, res *redash.Result, sum mask.Sum
 //
 // 行数が 0 件でも省略しない。マスクされた列が無いことと、まだ結果を見て
 // いないことは区別できないため、毎回同じ3行を出す。
-//
-// drop された列は Masked には出さず、Dropped だけに出す。sum.Masked() は
-// method: none 以外すべて（drop を含む）を返すが、Dropped 側で既に
-// 名指ししている列を Masked にも重複して出すと、同じ列が2箇所に出る
-// ノイズになる。
 func writeSummary(errW io.Writer, sum mask.Summary, rows int) error {
-	var masked []mask.ColumnMask
-	for _, c := range sum.Masked() {
-		if c.Method != config.MaskDrop {
-			masked = append(masked, c)
-		}
-	}
 	maskedStr := noneMarker
-	if len(masked) > 0 {
+	if masked := sum.MaskedKept(); len(masked) > 0 {
 		parts := make([]string, len(masked))
 		for i, c := range masked {
 			parts[i] = fmt.Sprintf("%s (%s)", c.Name, c.Method)
@@ -97,12 +85,32 @@ func writeSummary(errW io.Writer, sum mask.Summary, rows int) error {
 		maskedStr = strings.Join(parts, ", ")
 	}
 
-	dropped := sum.Dropped()
 	droppedStr := noneMarker
-	if len(dropped) > 0 {
+	if dropped := sum.Dropped(); len(dropped) > 0 {
 		droppedStr = strings.Join(dropped, ", ")
 	}
 
 	_, err := fmt.Fprintf(errW, "Masked: %s\nDropped: %s\nRows: %d\n", maskedStr, droppedStr, rows)
 	return err
+}
+
+// columnNames は列名だけを入力順に取り出す。table と csv のヘッダで共有する。
+func columnNames(cols []redash.Column) []string {
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.Name
+	}
+	return names
+}
+
+// cellAt は行から列 i の値を取る。列数より短い行は欠けた値を NULL と同じ
+// 扱いにする（redash.toResult や mask.Apply と同じ方針）。res が
+// mask.Engine.Apply の出力である限り実際には起きないが、Render はその前提を
+// 越えて任意の *redash.Result を受け取れる以上、越えた入力でも panic せず
+// NULL 側に倒す。
+func cellAt(row redash.Row, i int) any {
+	if i < len(row) {
+		return row[i]
+	}
+	return nil
 }
