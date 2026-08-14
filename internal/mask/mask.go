@@ -71,18 +71,25 @@ type columnMask struct {
 
 // New は解決済みの設定から、データソース1つ分のマスクエンジンを作る。
 //
-// ds はこの実行が対象とするデータソース。data_sources でスコープ指定された
-// ルールの絞り込みと、データソース単位の default_action の適用に使う。
+// dataSource はこの実行が対象とするデータソースの名前。data_sources で
+// スコープ指定されたルールの絞り込みと、データソース単位の default_action の
+// 適用に使う。
+//
+// 設定全体を受け取るのは、ルールが指しているデータソース名が実在するかを
+// 見るため。対象のデータソースだけを渡すと、他のデータソースを指した名前の
+// 綴り間違いを誰も見なくなる。
 //
 // 設定の誤りはここで全て弾く。ルールを1つでも黙って落とすと、マスクされる
 // はずの列が素通りする。
-func New(m config.Masking, ds config.DataSource) (*Engine, error) {
-	// 名前が無いと data_sources でスコープ指定されたルールが1つも
-	// マッチしなくなる。呼び出し側の詰め忘れを素通りさせない。
-	if ds.Name == "" {
-		return nil, errors.New("データソース名がありません。マスクはデータソースを固定して適用します")
+func New(cfg config.Config, dataSource string) (*Engine, error) {
+	// 定義されていない名前で引けると、data_sources でスコープ指定された
+	// ルールが1つもマッチしないまま実行される。
+	ds, ok := findDataSource(cfg.DataSources, dataSource)
+	if !ok {
+		return nil, fmt.Errorf("データソース %q は設定に定義されていません", dataSource)
 	}
 
+	m := cfg.Masking
 	fallback, err := fallbackMethod(m.DefaultAction, ds.DefaultAction)
 	if err != nil {
 		return nil, err
@@ -99,11 +106,11 @@ func New(m config.Masking, ds config.DataSource) (*Engine, error) {
 		// 検査は「そのルールが今回使われるか」と切り離して走らせる。
 		// 先にスコープで絞ると、別のデータソース向けのルールの書き間違いが、
 		// そのデータソースを引く日まで見つからない。
-		cr, err := compileRule(r)
+		cr, err := compileRule(r, cfg.DataSources)
 		if err != nil {
 			return nil, fmt.Errorf("masking.rules[%d] %v: %w", i, r.Patterns, err)
 		}
-		if !scopedTo(r.DataSources, ds.Name) {
+		if !scopedTo(r.DataSources, dataSource) {
 			continue // 他のデータソース向けのルール。
 		}
 		e.rules = append(e.rules, cr)
@@ -161,7 +168,8 @@ func strictness(a config.Action) int {
 }
 
 // compileRule はルール1件を照合器まで組み立てる。
-func compileRule(r config.MaskRule) (compiledRule, error) {
+// known は設定に定義されている全データソース。
+func compileRule(r config.MaskRule, known []config.DataSource) (compiledRule, error) {
 	if len(r.Patterns) == 0 {
 		return compiledRule{}, errors.New("patterns が空です")
 	}
@@ -173,9 +181,12 @@ func compileRule(r config.MaskRule) (compiledRule, error) {
 		return compiledRule{}, fmt.Errorf("method: %q は扱えません", r.Method)
 	}
 	for i, name := range r.DataSources {
-		// 空の名前はどのデータソースにも一致せず、ルールを丸ごと無効にする。
-		if name == "" {
-			return compiledRule{}, fmt.Errorf("data_sources[%d] が空です", i)
+		// 定義されていない名前（空文字列と綴り間違いを含む）はどの
+		// データソースにも一致せず、ルールを丸ごと無効にする。
+		// エラーも出ないため、マスクが外れたことに気付く手掛かりが無い。
+		if _, ok := findDataSource(known, name); !ok {
+			return compiledRule{}, fmt.Errorf("data_sources[%d]: %q は設定に定義されていません。"+
+				"定義されていない名前を書いてもルールは効きません", i, name)
 		}
 	}
 
@@ -188,6 +199,16 @@ func compileRule(r config.MaskRule) (compiledRule, error) {
 		cr.matchers = append(cr.matchers, m)
 	}
 	return cr, nil
+}
+
+// findDataSource は名前でデータソースを引く。
+func findDataSource(all []config.DataSource, name string) (config.DataSource, bool) {
+	for _, ds := range all {
+		if ds.Name == name {
+			return ds, true
+		}
+	}
+	return config.DataSource{}, false
 }
 
 // scopedTo は data_sources の指定がこのデータソースに掛かるかを返す。

@@ -128,6 +128,12 @@ func partialSpecOf(r config.MaskRule) (partialSpec, error) {
 		return partialSpec{}, fmt.Errorf("method: partial には keep: %q / keep_prefix / keep_suffix の"+
 			"いずれかが必要です", keepDomain)
 	}
+	if r.Method != config.MaskPartial && !spec.keepsNothing() {
+		// method: none に keep_prefix: 3 と書くのは「先頭3文字だけ見せる」
+		// つもりの書き間違いでありうる。そのまま通すと列が丸ごと素通りする。
+		return partialSpec{}, fmt.Errorf("keep / keep_prefix / keep_suffix は method: partial に"+
+			"だけ書けます。method: %q に書いても効きません", r.Method)
+	}
 	return spec, nil
 }
 
@@ -181,23 +187,32 @@ func applyPartial(s string, spec partialSpec) string {
 	return keepEnds(s, spec.prefix, spec.suffix)
 }
 
-// hostnameLike はホスト名として書ける並びだけからできているかを返す。
+// hostnameLike はドットで区切られたホスト名の形をしているかを返す。
 //
-// 判定は緩い（ラベルの長さも TLD の実在も見ない）が、残す側の条件として
-// 使うため、迷ったら false に倒す向きに効く。空白や句読点が1つでも
-// 混ざれば残さない。非 ASCII を弾かないのは国際化ドメイン名のため。
+// ドットを必須にする。1ラベルだけの並びを通すと、自由記述に混ざった
+// 「連絡先: @taro_handle」のようなメンションが、そのまま出力に残る。
+// TLD の無いアドレス（user@localhost）ではドメインを残せなくなるが、
+// 残さない側に倒す。
+//
+// 判定は緩い（ラベルの長さも TLD の実在も見ない）が、残す条件として
+// 使うため、緩さは「伏せる方向」ではなく「残す方向」にだけ効かない。
+// 空白や句読点が1つでも混ざれば残さない。非 ASCII を弾かないのは
+// 国際化ドメイン名のため。
 func hostnameLike(s string) bool {
-	if s == "" {
+	labels := strings.Split(s, ".")
+	if len(labels) < 2 {
 		return false
 	}
-	for _, c := range s {
-		if unicode.IsLetter(c) || unicode.IsDigit(c) {
-			continue
+	for _, label := range labels {
+		if label == "" {
+			return false
 		}
-		if c == '.' || c == '-' || c == '_' {
-			continue
+		for _, c := range label {
+			if unicode.IsLetter(c) || unicode.IsDigit(c) || c == '-' || c == '_' {
+				continue
+			}
+			return false
 		}
-		return false
 	}
 	return true
 }
