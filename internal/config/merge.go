@@ -20,10 +20,15 @@ import (
 // これに加えて、レビューされないレイヤ（ユーザ設定 / ローカル設定）には次の制約がかかる。
 //
 //	masking.rules の method: none     共有ファイルにのみ書ける。それ以外にあればエラー
-//	data_sources の default_action    グローバル既定より緩くできない
 //	data_sources の差し替え           共有設定で定義済みの名前は上書きできない
 //	data_sources の id                共有設定で定義済みの id に別名を付けられない
 //	redash.api_key / api_key_command  git 管理下のファイルに書けない
+//
+// data_sources[].default_action がグローバル既定より緩くなることは、レイヤに
+// 関わらず（共有ファイルの定義も含めて）常にエラーにする。internal/mask は
+// データソース単位の指定を厳格化方向にしか反映しない（fallbackMethod）ため、
+// レビュー済みの引き下げを許しても実行時には黙って無視され、「書いた設定が
+// 効かない」事故になる。
 //
 // いずれも「ローカル設定でマスクが弱まらないこと」を構造で担保するためのもの。
 // 規則を足すときは、それが単調（fail-closed）かどうかを先に確かめること。
@@ -303,23 +308,32 @@ func mergeDataSource(dst, src DataSource) DataSource {
 	return dst
 }
 
-// checkDataSourceActions はレビューされないレイヤで定義されたデータソースが、
+// checkDataSourceActions は、どのレイヤで定義されたデータソースも
 // グローバル既定より緩い default_action を持っていないことを確かめる。
 //
 // 未指定ならグローバル既定をそのまま継承するので緩くはならない。
-// 共有ファイルの定義は対象外とする。ADR-0003 §8 はグローバルを緩く保ったまま
-// データソース単位で引き上げる運用を前提にしており、レビュー済みの引き下げまで
-// 禁じると、その運用に必要な自由度を潰してしまう。
+//
+// レビュー済み（共有ファイル）の定義もここでは対象外にしない。かつては
+// 「ADR-0003 §8 はグローバルを緩く保ったままデータソース単位で引き上げる
+// 運用を前提にしており、レビュー済みの引き下げまで禁じるとその自由度を
+// 潰す」として対象外にしていたが、internal/mask.fallbackMethod は
+// レイヤのレビュー有無を知らず、データソース単位の指定を常に「厳格化方向に
+// しか効かせない」（グローバルより緩ければ黙って無視する）。つまり
+// レビュー済みの引き下げを config 側で許しても、実行時には効かず、
+// 「書いた設定が黙って別の値に差し替わる」（.claude/rules/go-architecture.md
+// の禁止するゼロ値の扱いと同種の事故）になっていた。ここで拒否することで
+// config の受け付ける範囲を internal/mask が実際に反映できる範囲に揃える。
 func (r *Resolved) checkDataSourceActions() error {
 	global := r.Config.Masking.DefaultAction
 	for _, ds := range r.Config.DataSources {
-		origin := r.dataSourceOrigins[ds.Name]
-		if origin.layer.Reviewed() || ds.DefaultAction == "" {
+		if ds.DefaultAction == "" {
 			continue
 		}
 		if ds.DefaultAction.strictness() < global.strictness() {
+			origin := r.dataSourceOrigins[ds.Name]
 			return fmt.Errorf("%s: data_sources (%s): default_action: %q は"+
-				"グローバル既定 %q より緩いため指定できません",
+				"グローバル既定 %q より緩いため指定できません。データソース単位の"+
+				"default_action は引き上げる方向にのみ使えます（共有ファイルの定義でも同様です）",
 				origin.origin(), ds.Name, ds.DefaultAction, global)
 		}
 	}

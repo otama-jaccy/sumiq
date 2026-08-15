@@ -434,7 +434,9 @@ func TestResolve_データソースの再定義(t *testing.T) {
 	}
 }
 
-// ローカル定義のデータソースは、グローバル既定より緩い default_action を持てない。
+// データソースは、レイヤに関わらずグローバル既定より緩い default_action を持てない。
+// 共有ファイルの定義も対象（#18）。internal/mask が厳格化方向にしか反映しないため、
+// レビュー済みの引き下げを config が許しても実行時には黙って無視されてしまう。
 func TestResolve_ローカルデータソースのDefaultAction(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -478,13 +480,13 @@ func TestResolve_ローカルデータソースのDefaultAction(t *testing.T) {
 			},
 		},
 		{
-			// 共有ファイルは対象外。ADR-0003 §8 はグローバルを緩く保ったまま
-			// データソース単位で上げる運用を前提にしており、レビュー済みの
-			// 引き下げまで禁じるとその自由度を失う。
-			name: "共有ファイルの定義は対象外",
-			files: layerFiles{
-				shared: "version: 1\nmasking: {default_action: redact}\ndata_sources: [{name: sandbox, id: 9, default_action: none}]\n",
-			},
+			// 共有ファイルの定義もグローバルより緩くはできない。internal/mask は
+			// データソース単位の指定を厳格化方向にしか反映しないため、レビュー済みの
+			// 引き下げを config が許しても実行時には黙って無視される
+			// （書いた設定が効かない事故になる。ADR-0015 参照）。
+			name:    "共有ファイルの定義も対象",
+			files:   layerFiles{shared: "version: 1\nmasking: {default_action: redact}\ndata_sources: [{name: sandbox, id: 9, default_action: none}]\n"},
+			wantErr: "より緩いため指定できません",
 		},
 		{
 			// 判定はグローバル既定を全部畳んだ後で行う。ローカルの方が先に
