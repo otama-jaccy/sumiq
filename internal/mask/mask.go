@@ -103,13 +103,16 @@ func New(cfg config.Config, dataSource string) (*Engine, error) {
 		return nil, fmt.Errorf("hash 用の salt を生成できませんでした: %w", err)
 	}
 
-	for i, r := range m.Rules {
+	for _, r := range m.Rules {
 		// 検査は「そのルールが今回使われるか」と切り離して走らせる。
 		// 先にスコープで絞ると、別のデータソース向けのルールの書き間違いが、
 		// そのデータソースを引く日まで見つからない。
 		cr, err := compileRule(r, cfg.DataSources)
 		if err != nil {
-			return nil, fmt.Errorf("masking.rules[%d] %v: %w", i, r.Patterns, err)
+			// r.Origin はマージ後の union index ではなく、利用者が開くファイルの
+			// 何番目かを示す（config.RuleOrigin）。全レイヤの和集合での添字を
+			// そのまま出すと、開いたファイルのどの行かと一致しなくなる。
+			return nil, fmt.Errorf("%s %v: %w", r.Origin, r.Patterns, err)
 		}
 		if !scopedTo(r.DataSources, dataSource) {
 			continue // 他のデータソース向けのルール。

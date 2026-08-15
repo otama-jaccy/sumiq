@@ -9,6 +9,8 @@
 // bool だけは false が有効な指定と区別できないため *bool で受ける。
 package config
 
+import "fmt"
+
 // SchemaVersion はこのパッケージが扱える設定ファイルの version。
 const SchemaVersion = 1
 
@@ -87,6 +89,29 @@ type MaskRule struct {
 	Note string `yaml:"note"`
 	// DataSources が空でなければ、そのデータソースにのみ追加適用される。
 	DataSources []string `yaml:"data_sources"`
+	// Origin はこのルールの由来（レイヤ・ファイル・ファイル内での位置）。
+	// YAML には現れず、マージ時に config パッケージが設定する。
+	//
+	// internal/mask がルールの検証エラーを出すとき、和集合後の union index
+	// ではなく「利用者が開くファイルの何番目か」を示せるようにするために持つ。
+	Origin RuleOrigin `yaml:"-"`
+}
+
+// RuleOrigin はルール1件がどのレイヤのどのファイルの何番目に書かれたかを示す。
+type RuleOrigin struct {
+	layer Layer
+	path  string
+	// index はこのルールが由来するファイル内での0始まりの位置。
+	index int
+}
+
+// String は "共有設定 (path) の masking.rules[N]" の形式で出どころを表す。
+func (o RuleOrigin) String() string {
+	origin := o.layer.String()
+	if o.path != "" {
+		origin = fmt.Sprintf("%s (%s)", origin, o.path)
+	}
+	return fmt.Sprintf("%s の masking.rules[%d]", origin, o.index)
 }
 
 // Output は出力形式。
