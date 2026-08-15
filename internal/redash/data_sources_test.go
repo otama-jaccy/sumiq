@@ -9,8 +9,36 @@ import (
 	"time"
 )
 
-// TestListDataSources は正常系で []DataSource へデコードされることを見る。
+// TestListDataSources は実際の Redash の応答形（paused が 0/1 の数値）で
+// []DataSource へデコードされることを見る。
+//
+// paused は redash/models/__init__.py の DataSource.paused プロパティが
+// redis_connection.exists(...)（redis-py の exists() は int を返す）を
+// そのまま返す実装で、JSON では bool ではなく 0/1 の数値になる。
 func TestListDataSources(t *testing.T) {
+	c := start(t, respond(http.StatusOK,
+		`[{"id":1,"name":"analytics","type":"pg","paused":0},`+
+			`{"id":2,"name":"legacy","type":"mysql","paused":1}]`), nil)
+
+	got, err := c.ListDataSources(context.Background())
+	if err != nil {
+		t.Fatalf("ListDataSources: %v", err)
+	}
+
+	want := []DataSource{
+		{ID: 1, Name: "analytics", Type: "pg", Paused: false},
+		{ID: 2, Name: "legacy", Type: "mysql", Paused: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListDataSources() = %#v, want %#v", got, want)
+	}
+}
+
+// TestListDataSourcesPausedAsBool は paused が bool リテラルで来ても読めることを見る。
+//
+// 実際の Redash は 0/1 の数値しか返さない（DataSource.UnmarshalJSON のコメント
+// 参照）が、bool を送ってくる実装差分があっても壊れないようにしてある。
+func TestListDataSourcesPausedAsBool(t *testing.T) {
 	c := start(t, respond(http.StatusOK,
 		`[{"id":1,"name":"analytics","type":"pg","paused":false},`+
 			`{"id":2,"name":"legacy","type":"mysql","paused":true}]`), nil)
@@ -26,6 +54,17 @@ func TestListDataSources(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ListDataSources() = %#v, want %#v", got, want)
+	}
+}
+
+// TestListDataSourcesPausedInvalid は paused が bool でも 0/1 でもない
+// 値のとき、推測せずエラーにすることを見る。
+func TestListDataSourcesPausedInvalid(t *testing.T) {
+	c := start(t, respond(http.StatusOK,
+		`[{"id":1,"name":"analytics","type":"pg","paused":"maybe"}]`), nil)
+
+	if _, err := c.ListDataSources(context.Background()); err == nil {
+		t.Fatal("paused が不正な値なのにエラーになりませんでした")
 	}
 }
 
