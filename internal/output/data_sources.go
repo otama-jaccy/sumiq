@@ -7,13 +7,17 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/otama-jaccy/sumiq/internal/redash"
 )
 
 // dataSourceColumns は `data-sources list` の出力列（この順）。
-var dataSourceColumns = []string{"id", "name", "type", "paused"}
+//
+// 呼び出し側で書き換えられないよう、参照ではなく毎回新しいスライスを返す
+// （パッケージレベルの可変変数を避ける）。
+func dataSourceColumns() []string {
+	return []string{"id", "name", "type", "paused"}
+}
 
 // RenderDataSources は ds を format で out に書く。
 //
@@ -48,13 +52,9 @@ func renderDataSourcesTable(out io.Writer, ds []redash.DataSource, tty bool) err
 		return nil
 	}
 
-	var flags uint
-	if tty {
-		flags = tabwriter.Debug
-	}
-	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', flags)
+	tw := newTabwriter(out, tty)
 
-	if _, err := fmt.Fprintln(tw, strings.Join(dataSourceColumns, "\t")); err != nil {
+	if _, err := fmt.Fprintln(tw, strings.Join(dataSourceColumns(), "\t")); err != nil {
 		return err
 	}
 	for _, d := range ds {
@@ -89,7 +89,7 @@ func renderDataSourcesJSON(out io.Writer, ds []redash.DataSource) error {
 func renderDataSourcesCSV(out io.Writer, ds []redash.DataSource) error {
 	w := csv.NewWriter(out)
 
-	if err := w.Write(dataSourceColumns); err != nil {
+	if err := w.Write(dataSourceColumns()); err != nil {
 		return err
 	}
 	for _, d := range ds {
