@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // TestListDataSources は正常系で []DataSource へデコードされることを見る。
@@ -53,5 +54,39 @@ func TestListDataSourcesForbidden(t *testing.T) {
 	var authErr *AuthError
 	if !errors.As(err, &authErr) {
 		t.Fatalf("エラーの型 = %T, want *AuthError: %v", err, err)
+	}
+}
+
+// TestListDataSourcesTimeout は timeout 超過を *TimeoutError として報告することを見る。
+//
+// classifyContextErr を通さないと、context の締切超過が do の connectError に
+// 包まれたまま返り、「Redash への接続に失敗しました」という誤った文言になる
+// （/code-review medium の指摘）。
+func TestListDataSourcesTimeout(t *testing.T) {
+	block := make(chan struct{})
+
+	c := start(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}), func(o *Options) { o.Timeout = 80 * time.Millisecond })
+
+	// LIFO: start が登録した srv.Close より後に登録し、先に走らせる。
+	// 逆順だと Close がハンドラの終了を待ち、ハンドラは block を待ったまま
+	// テストごと止まる（.claude/rules/go-architecture.md 「応答を止める
+	// テストサーバは、締切と競争させない」）。
+	t.Cleanup(func() { close(block) })
+
+	begin := time.Now()
+	_, err := c.ListDataSources(context.Background())
+	elapsed := time.Since(begin)
+
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("エラーの型 = %T, want *TimeoutError: %v", err, err)
+	}
+	if timeoutErr.Phase != PhaseListDataSources {
+		t.Errorf("Phase = %q, want %q", timeoutErr.Phase, PhaseListDataSources)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("timeout を超えても待ち続けています: %v", elapsed)
 	}
 }
