@@ -166,6 +166,22 @@ dec.UseNumber()   // これが無いと 9007199254740993 が 9007199254740992 �
 型を決めずに受ける場所（クエリ結果のセル等）では必ず立てる。
 立てたことに依存するコメントを書くなら、**どの関数が立てているかを名指しする。**
 
+### Redash の応答で bool に見えるフィールドを `bool` 型でそのまま受けない
+
+Redash のモデルは Python の `bool` を返しているとは限らない。`DataSource.paused`
+は `redis_connection.exists(...)` をそのまま返す実装で、redis-py の
+`Redis.exists()` は `bool` ではなく `int`（0 または 1）を返す（redis-py の
+`commands/core.py` の型注釈）。そのため JSON の応答は `"paused": true/false`
+ではなく `"paused": 0/1` という数値になり、Go 側で素朴に `bool` フィールドへ
+decode すると `json: cannot unmarshal number into ... of type bool` で落ちる
+（`internal/redash/data_sources.go` の `ListDataSources` で実機に対して踏んだ）。
+
+Redash のフィールドが Python のプロパティ実装依存で bool と数値のどちらを
+返すか確証が持てない場合は、素朴な `bool` ではなく、両方を読める decode を
+用意すること（`DataSource.UnmarshalJSON` / `pausedField` を参照）。
+モデル実装（`redash/models/__init__.py` 等）を確認せずに「bool のはず」と
+決め打ちしない。
+
 ### 外部から来た値を `url.JoinPath` にそのまま渡さない
 
 `url.JoinPath` は要素の中の `/` と `%` をエスケープせず、`..` を辿って詰める。
