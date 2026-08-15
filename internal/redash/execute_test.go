@@ -153,6 +153,119 @@ func TestExecuteRespectsPollInterval(t *testing.T) {
 	}
 }
 
+// TestExecuteWaitRetriesOnTransientFailure は一時的な障害（5xx・429・接続失敗）を
+// 再試行し、次のポーリングで成功すればジョブを諦めないことを見る。
+func TestExecuteWaitRetriesOnTransientFailure(t *testing.T) {
+	tests := []struct {
+		name         string
+		firstJobResp http.HandlerFunc
+		mutate       func(*Options)
+	}{
+		{
+			name:         "5xx",
+			firstJobResp: respond(http.StatusBadGateway, `{"message":"Bad Gateway"}`),
+		},
+		{
+			// レート制限。再試行しても poll_interval だけ待つので、
+			// LB の瞬断と同じ「一時的な障害」として扱う。
+			name:         "429",
+			firstJobResp: respond(http.StatusTooManyRequests, `{"message":"Too Many Requests"}`),
+		},
+		{
+			name:         "接続失敗",
+			firstJobResp: hijackAndClose(),
+			// KeepAlive を無効にしないと、net/http の Transport が「再利用した
+			// 接続でネットワークエラーが起きた冪等リクエスト」を自前で1回だけ
+			// 黙って再送してしまい、isRetryableWaitErr を通さずテストが通ってしまう。
+			mutate: func(o *Options) {
+				o.HTTPClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := defaultFake(t)
+			f.jobs = []http.HandlerFunc{
+				tt.firstJobResp,
+				respond(http.StatusOK, jobBody(jobFinished, "", "42")),
+			}
+			c := start(t, f, tt.mutate)
+
+			if _, err := c.Execute(context.Background(), testQuery()); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if got := f.pollCount(); got != 2 {
+				t.Errorf("ポーリング回数 = %d, want 2 (1回失敗 + 1回成功)", got)
+			}
+		})
+	}
+}
+
+// TestExecuteWaitDoesNotRetryPermanentFailure は再試行しても直らない失敗
+// （認証・権限、5xx 未満の APIError）を即座に失敗させることを見る。
+//
+// 再試行対象にすると、本当の失敗の検知が timeout まで遅れる。
+func TestExecuteWaitDoesNotRetryPermanentFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		wantAs any
+	}{
+		{name: "認証エラー_401", status: http.StatusUnauthorized, wantAs: new(*AuthError)},
+		{name: "クライアントエラー_400", status: http.StatusBadRequest, wantAs: new(*APIError)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := defaultFake(t)
+			f.jobs = []http.HandlerFunc{respond(tt.status, `{"message":"boom"}`)}
+			c := start(t, f, func(o *Options) { o.Timeout = 2 * time.Second })
+
+			begin := time.Now()
+			_, err := c.Execute(context.Background(), testQuery())
+			elapsed := time.Since(begin)
+
+			if !errors.As(err, tt.wantAs) {
+				t.Fatalf("エラーの型 = %T, want %T: %v", err, tt.wantAs, err)
+			}
+			if got := f.pollCount(); got != 1 {
+				t.Errorf("ポーリング回数 = %d, want 1 (再試行してはいけない)", got)
+			}
+			if elapsed > time.Second {
+				t.Errorf("timeout 近くまで待っています。再試行していないか確認してください: %v", elapsed)
+			}
+		})
+	}
+}
+
+// TestExecuteWaitRetryBoundedByTimeout は再試行が続いても timeout で
+// 打ち切られることを見る。専用のリトライ上限を設けていないため、
+// これが無いと持続的な障害で無限に再試行し続ける。
+func TestExecuteWaitRetryBoundedByTimeout(t *testing.T) {
+	f := defaultFake(t)
+	f.jobs = []http.HandlerFunc{respond(http.StatusBadGateway, `{"message":"Bad Gateway"}`)}
+	c := start(t, f, func(o *Options) {
+		o.Timeout = 80 * time.Millisecond
+		o.PollInterval = 5 * time.Millisecond
+	})
+
+	begin := time.Now()
+	_, err := c.Execute(context.Background(), testQuery())
+	elapsed := time.Since(begin)
+
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("エラーの型 = %T, want *TimeoutError: %v", err, err)
+	}
+	if timeoutErr.Phase != PhaseWait {
+		t.Errorf("Phase = %q, want %q", timeoutErr.Phase, PhaseWait)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("timeout を超えても再試行し続けています: %v", elapsed)
+	}
+}
+
 // TestExecuteJobFailedWith200 はジョブの失敗が HTTP 200 で返ることを見る。
 //
 // Redash は SQL のエラーも 200 の本文に載せる。ステータスコードだけで
