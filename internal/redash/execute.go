@@ -24,6 +24,15 @@ type Query struct {
 	// 効けば転送量が減るだけの最適化であり、安全装置ではない（ADR-0003 §10）。
 	// CTE を含むクエリや非 SQL のデータソースでは黙って効かない。
 	AutoLimit bool
+	// RowLimit は fetch が rows をメモリに保持する上限。0 以下なら上限なし
+	// （未指定の呼び出し側との後方互換。テストや将来の呼び出し用）。
+	//
+	// 呼び出し側が実際の安全装置として使うときは query.max_rows を渡す責務を
+	// 負う（ADR-0003 §10「max_rows は必ず効く安全装置」を、取得中に OOM で
+	// 落ちる前に効かせるため。Issue #16）。fetch は RowLimit+1 件までしか
+	// 保持しない。+1 を保持するのは、呼び出し側（rowguard.Check）が
+	// len(Result.Rows) > max_rows で超過を判定できるようにするため。
+	RowLimit int
 }
 
 // queryRequest は POST /api/query_results のリクエスト本文。
@@ -97,7 +106,7 @@ func (c *Client) Execute(ctx context.Context, q Query) (*Result, error) {
 
 	// ここから先、ジョブは完了している。打ち切ったときに「まだ動いている」と
 	// 伝えないよう、段を分けて渡す。
-	res, err := c.fetch(execCtx, resultID)
+	res, err := c.fetch(execCtx, resultID, q.RowLimit)
 	if err != nil {
 		return nil, c.classifyContextErr(ctx, execCtx, PhaseFetch, jobID, err)
 	}
@@ -213,16 +222,36 @@ func (c *Client) jobStatus(ctx context.Context, jobID string) (*job, error) {
 }
 
 // fetch は結果を取得して Result に落とす。
-func (c *Client) fetch(ctx context.Context, resultID int64) (*Result, error) {
-	var env queryResultEnvelope
+//
+// rowLimit が 1 以上のときは、応答本文を1回で丸ごとデコードせず、rows を
+// 1件ずつ読みながら rowLimit+1 件を超えた分を保持しない
+// （decodeQueryResult のコメントを参照。ADR-0003 §10 が「必ず効く」とする
+// max_rows の判定に、取得の時点で OOM で落ちて辿り着けない問題への対応。
+// Issue #16）。
+func (c *Client) fetch(ctx context.Context, resultID int64, rowLimit int) (*Result, error) {
 	url := c.resolve("api", "query_results", strconv.FormatInt(resultID, 10))
-	if err := c.do(ctx, http.MethodGet, url, nil, &env); err != nil {
+	resp, err := c.roundTrip(ctx, http.MethodGet, url, nil)
+	if err != nil {
 		return nil, err
 	}
-	if env.QueryResult == nil {
-		return nil, fmt.Errorf("Redash の応答に query_result がありません (結果 %d)", resultID)
+	defer drainAndClose(resp.Body)
+
+	dec := json.NewDecoder(resp.Body)
+	// UseNumber は Row の型の前提。外すと 2^53 を超える整数が静かに丸まる。
+	dec.UseNumber()
+
+	qr, err := decodeQueryResult(dec, rowLimit)
+	if err != nil {
+		// shapeError は JSON の構文としては正しいが期待した形と違う、という
+		// 意味のエラー。classifyDecodeErr の「JSON として読めませんでした」に
+		// 通すと、読めているのに読めなかったと言う自己矛盾した文言になる。
+		var shapeErr *shapeError
+		if errors.As(err, &shapeErr) {
+			return nil, fmt.Errorf("%s (結果 %d)", shapeErr.Error(), resultID)
+		}
+		return nil, c.classifyDecodeErr(err)
 	}
-	return env.QueryResult.toResult()
+	return qr.toResult()
 }
 
 // sleep は d 待つ。待っている間に ctx が終わったらその理由を返す。
@@ -255,15 +284,24 @@ func (c *Client) classifyContextErr(parent, exec context.Context, phase Phase, j
 	return err
 }
 
-// do は HTTP リクエストを1回投げ、応答の JSON を dst に読む。
-func (c *Client) do(ctx context.Context, method, url string, body []byte, dst any) error {
+// roundTrip は HTTP リクエストを1回投げ、ステータスを確認して応答を返す。
+//
+// 呼び出し側は戻り値の resp.Body を必ず閉じること。本文はまだ読んでいない
+// 状態で返る。2xx 以外はここで本文を読み切って閉じ、httpError を返す
+// （呼び出し側に閉じさせる必要をなくす）。
+//
+// resp.Body は maxResponseBytes で打ち切るように差し替えて返す。行数の
+// 上限（Query.RowLimit）は rows 配列の要素数だけを絞るため、1行の値が
+// 極端に大きい応答や rows 以外のフィールドが肥大化した応答までは防げない。
+// ここでの上限は行数と無関係にかける最後の防御線（Issue #16）。
+func (c *Client) roundTrip(ctx context.Context, method, url string, body []byte) (*http.Response, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, r)
 	if err != nil {
-		return fmt.Errorf("リクエストを作れませんでした: %w", err)
+		return nil, fmt.Errorf("リクエストを作れませんでした: %w", err)
 	}
 	// Redash は Authorization ヘッダの先頭の "Key " だけを剥がして API KEY として
 	// 読む（redash/authentication/__init__.py の get_api_key_from_request）。
@@ -286,7 +324,7 @@ func (c *Client) do(ctx context.Context, method, url string, body []byte, dst an
 		// SSO のトークンを載せたまま返すことになる。
 		var redirErr *redirectError
 		if errors.As(err, &redirErr) {
-			return redirErr
+			return nil, redirErr
 		}
 		// それ以外の err は *url.Error でメソッドと URL を含む。URL は検証済みの
 		// endpoint から組み立てたもので、クエリも認証情報も持たない。
@@ -295,26 +333,55 @@ func (c *Client) do(ctx context.Context, method, url string, body []byte, dst an
 		// connectError で包む。呼び出し元（今は wait だけ）はこれを見て
 		// 一時的な障害かどうかを判定できる（LB の瞬断や DNS の一時的な失敗を、
 		// 走り続けているジョブごと捨てないため）。
-		return &connectError{err: err}
+		return nil, &connectError{err: err}
 	}
-	defer func() {
-		// 本文を読み切らずに閉じると接続が再利用されない。エラー時は
-		// errorMessage が先頭だけ読んでいるため、残りをここで捨てる。
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
-		_ = resp.Body.Close()
-	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return c.httpError(resp)
+		defer drainAndClose(resp.Body)
+		return nil, c.httpError(resp)
 	}
+
+	resp.Body = limitBody(resp.Body, c.maxResponseBytes)
+	return resp, nil
+}
+
+// do は HTTP リクエストを1回投げ、応答の JSON を dst に丸ごと読む。
+func (c *Client) do(ctx context.Context, method, url string, body []byte, dst any) error {
+	resp, err := c.roundTrip(ctx, method, url, body)
+	if err != nil {
+		return err
+	}
+	defer drainAndClose(resp.Body)
 
 	dec := json.NewDecoder(resp.Body)
 	// UseNumber は Row の型の前提。外すと 2^53 を超える整数が静かに丸まる。
 	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {
-		return fmt.Errorf("Redash の応答を JSON として読めませんでした: %w", err)
+		return c.classifyDecodeErr(err)
 	}
 	return nil
+}
+
+// drainAndClose は body を最後まで読み捨ててから閉じる。
+//
+// 読み切らずに閉じると接続が keep-alive として再利用されない
+// （net/http.Response.Body のドキュメント）。エラー応答は errorMessage が
+// 先頭だけ読んでいるため、残りをここで捨てる。
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrainBytes))
+	_ = body.Close()
+}
+
+// classifyDecodeErr は JSON デコードの失敗を利用者に分かる形に直す。
+//
+// *http.MaxBytesError は文言を添えて包む。%w で包めば、呼び出し側は
+// 引き続き errors.As で見分けられる。
+func (c *Client) classifyDecodeErr(err error) error {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return fmt.Errorf("Redash の応答本文が上限（%d バイト）を超えました: %w", tooLarge.Limit, tooLarge)
+	}
+	return fmt.Errorf("Redash の応答を JSON として読めませんでした: %w", err)
 }
 
 const (

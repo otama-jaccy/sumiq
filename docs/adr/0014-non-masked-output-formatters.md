@@ -1,4 +1,4 @@
-# ADR-0013: マスク不要なコマンドは `Render` を経由しない独立した formatter を持つ
+# ADR-0014: マスク不要なコマンドは `Render` を経由しない独立した formatter を持つ
 
 - ステータス: Accepted
 - 日付: 2026-08-15
