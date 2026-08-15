@@ -284,7 +284,7 @@ tabwriter は全 Unicode コードポイントを同じ幅として列幅を計�
 締切超過を `classifyContextErr` に通し、呼び出し側のキャンセルと区別したうえで
 `*TimeoutError` に変換している。これを素通しすると、実際にはタイムアウトなのに
 「Redash への接続に失敗しました」という誤った文言になる（`ListDataSources` で
-一度踏んだ。[ADR-0013](../../docs/adr/0013-non-masked-output-formatters.md) の
+一度踏んだ。[ADR-0014](../../docs/adr/0014-non-masked-output-formatters.md) の
 実装時に `/code-review` で検出）。
 
 ```go
@@ -330,6 +330,25 @@ out := src[:n:n]
 
 `max_rows` の truncate（`internal/rowguard`）のように、安全装置として入力の
 一部だけを新しい意味の値にして返す関数で踏みやすい。
+
+### `json.Decoder` でストリーミング読みするなら、キーの到達順に処理ロジックを依存させない
+
+JSON オブジェクトのキー順は仕様として保証されない。`encoding/json` を
+`Decoder.Token` で手動走査するとき、「このキーは先に来るはず」という前提で
+組むと、送信側の実装が変わる・別のシリアライザを経由する・プロキシが
+並べ替える、のいずれかでキー順が変わった応答を誤って壊れているとみなす。
+
+```go
+// 悪い: rows が columns より先に来る前提で、上限に達した時点で
+// 読むのをやめて接続を切る。columns がまだ来ていなければ、
+// 「columns がありません」と誤って落ちる。
+```
+
+一方のキーを先に処理し終える必要がある値（列名で行を射影する等）は、
+両方のキーを最後まで読み切ってから組み立てる。読み捨ててよい値は
+`any` ではなく `json.RawMessage` で受ける。ネストした map・slice・
+interface へ組み立てる分の割り当てを払わずに済む
+（[ADR-0013](../../docs/adr/0013-bounded-fetch.md)）。
 
 ## テスト
 
@@ -392,7 +411,9 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
 - [ADR-0011](../../docs/adr/0011-partial-keep-options.md): `partial` の `keep` の仕様
   （上の「残す条件として書く」の背景）
 - [ADR-0012](../../docs/adr/0012-poll-transient-retry.md): ポーリング中の一時的な失敗（接続失敗・429・5xx）のリトライ方針
-- [ADR-0013](../../docs/adr/0013-non-masked-output-formatters.md): マスク不要なコマンドは
+- [ADR-0013](../../docs/adr/0013-bounded-fetch.md): fetch の取得を打ち切り可能にする
+  （上の「`json.Decoder` でストリーミング読みするなら」の背景）
+- [ADR-0014](../../docs/adr/0014-non-masked-output-formatters.md): マスク不要なコマンドは
   `Render` を経由しない独立した formatter を持つ（上の「単発 GET の `classifyContextErr`」の背景）
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
