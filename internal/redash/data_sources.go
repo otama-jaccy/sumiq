@@ -20,12 +20,12 @@ type DataSource struct {
 // job 投入・ポーリングを伴う Execute とは別経路（同期・単発の GET）。
 // c.timeout だけを上限にする。
 func (c *Client) ListDataSources(ctx context.Context) ([]DataSource, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	execCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
 	var ds []DataSource
-	if err := c.do(ctx, http.MethodGet, c.resolve("api", "data_sources"), nil, &ds); err != nil {
-		return nil, err
+	if err := c.do(execCtx, http.MethodGet, c.resolve("api", "data_sources"), nil, &ds); err != nil {
+		return nil, c.classifyContextErr(ctx, execCtx, PhaseListDataSources, "", err)
 	}
 	return ds, nil
 }

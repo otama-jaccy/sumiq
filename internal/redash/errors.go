@@ -96,6 +96,9 @@ const (
 	PhaseWait Phase = "wait"
 	// PhaseFetch は結果の取得（GET /api/query_results/{id}）。
 	PhaseFetch Phase = "fetch"
+	// PhaseListDataSources は GET /api/data_sources（ListDataSources）。
+	// submit/wait/fetch の3段構えとは別の、ジョブを介さない単発 GET。
+	PhaseListDataSources Phase = "list_data_sources"
 )
 
 // TimeoutError は timeout 以内に処理が終わらなかったことを表す。
@@ -131,6 +134,10 @@ func (e *TimeoutError) Error() string {
 		return fmt.Sprintf("Redash のクエリは完了しましたが、結果の取得が %s 以内に"+
 			"終わりませんでした (ジョブ %s)。redash.timeout を延ばすか、"+
 			"取得する行数を減らしてください", e.Timeout, e.JobID)
+	case PhaseListDataSources:
+		// ジョブを介さない単発 GET なので、ジョブ ID もクエリを軽くする助言も無い。
+		return fmt.Sprintf("Redash が %s 以内にデータソース一覧を返しませんでした。"+
+			"redash.timeout を延ばすか、接続を確認してください", e.Timeout)
 	default:
 		return fmt.Sprintf("Redash のクエリが %s 以内に終わりませんでした (ジョブ %s)。"+
 			"ジョブは Redash 側で実行され続けます。redash.timeout を延ばすか、クエリを軽くしてください",
