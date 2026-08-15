@@ -30,6 +30,8 @@ type Options struct {
 	Timeout time.Duration
 	// PollInterval は /api/jobs/{id} を叩く間隔。0 なら DefaultPollInterval。
 	PollInterval time.Duration
+	// MaxResponseBytes は応答本文1回分に許す上限。0 なら DefaultMaxResponseBytes。
+	MaxResponseBytes int64
 	// HTTPClient は nil なら既定のものを作る。テストから差し替える。
 	HTTPClient *http.Client
 }
@@ -45,11 +47,12 @@ const (
 //
 // フィールドは生成後に変更しない。並行して Execute を呼べる。
 type Client struct {
-	endpoint     *url.URL
-	apiKey       string
-	timeout      time.Duration
-	pollInterval time.Duration
-	httpClient   *http.Client
+	endpoint         *url.URL
+	apiKey           string
+	timeout          time.Duration
+	pollInterval     time.Duration
+	maxResponseBytes int64
+	httpClient       *http.Client
 }
 
 // New は Client を作る。
@@ -64,10 +67,11 @@ func New(opts Options) (*Client, error) {
 	}
 
 	c := &Client{
-		endpoint:     u,
-		apiKey:       opts.APIKey,
-		timeout:      opts.Timeout,
-		pollInterval: opts.PollInterval,
+		endpoint:         u,
+		apiKey:           opts.APIKey,
+		timeout:          opts.Timeout,
+		pollInterval:     opts.PollInterval,
+		maxResponseBytes: opts.MaxResponseBytes,
 		// httpClient は opts.HTTPClient をそのままは使わない。
 		// リダイレクトを拒否する設定を足した複製を下で入れる。
 	}
@@ -76,6 +80,9 @@ func New(opts Options) (*Client, error) {
 	}
 	if c.pollInterval <= 0 {
 		c.pollInterval = DefaultPollInterval
+	}
+	if c.maxResponseBytes <= 0 {
+		c.maxResponseBytes = DefaultMaxResponseBytes
 	}
 	c.httpClient = withRedirectsRefused(opts.HTTPClient)
 	return c, nil

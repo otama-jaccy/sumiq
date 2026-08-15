@@ -81,6 +81,11 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		SQL:          p.SQL,
 		DataSourceID: ds.ID,
 		AutoLimit:    rowguard.EffectiveAutoLimit(resolved.Config.Query, ds),
+		// max_rows を fetch の取得段階にも渡す。rowguard.Check の判定は
+		// 取得済みの結果に対して行われるため、それだけでは auto_limit: false
+		// で巨大な結果を引いたときに判定へ辿り着く前の OOM を防げない
+		// （ADR-0003 §10、Issue #16）。
+		RowLimit: resolved.Config.Query.MaxRows,
 	})
 	if err != nil {
 		return err
