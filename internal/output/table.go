@@ -23,14 +23,7 @@ func renderTable(out io.Writer, res *redash.Result, tty bool) error {
 		return nil
 	}
 
-	// 非 TTY では装飾（列区切りの罫線）を落とす。tabwriter.Debug は列の
-	// 境界に '|' を挿む標準ライブラリの機能で、タブ区切りという形式自体は
-	// 変えずに見た目だけ切り替えられる（ADR-0004 §2）。
-	var flags uint
-	if tty {
-		flags = tabwriter.Debug
-	}
-	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', flags)
+	tw := newTabwriter(out, tty)
 
 	if _, err := fmt.Fprintln(tw, strings.Join(columnNames(res.Columns), "\t")); err != nil {
 		return err
@@ -47,6 +40,19 @@ func renderTable(out io.Writer, res *redash.Result, tty bool) error {
 	}
 
 	return tw.Flush()
+}
+
+// newTabwriter は table 出力用の tabwriter.Writer を作る。
+//
+// 非 TTY では装飾（列区切りの罫線）を落とす。tabwriter.Debug は列の
+// 境界に '|' を挿む標準ライブラリの機能で、タブ区切りという形式自体は
+// 変えずに見た目だけ切り替えられる（ADR-0004 §2）。
+func newTabwriter(out io.Writer, tty bool) *tabwriter.Writer {
+	var flags uint
+	if tty {
+		flags = tabwriter.Debug
+	}
+	return tabwriter.NewWriter(out, 0, 4, 2, ' ', flags)
 }
 
 // tableCell は値1つを table のセルの文字列にする。
