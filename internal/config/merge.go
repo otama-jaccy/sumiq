@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 )
 
 // マージ規則の一覧。項目ごとに規則が違うのは ADR-0003 の意図した設計であり、
@@ -422,21 +423,12 @@ func (r *Resolved) checkMaskRuleWeakening() error {
 // redactedScopeOf は rule が適用されうる範囲に default_action: redact な
 // スコープがあるかを返す。あればそのデータソース名（グローバルなら空文字列）も返す。
 func (r *Resolved) redactedScopeOf(rule MaskRule) (string, bool) {
-	if len(rule.DataSources) == 0 {
-		if r.Config.Masking.DefaultAction == ActionRedact {
-			return "", true
-		}
-		for _, ds := range r.Config.DataSources {
-			if effectiveDefaultAction(ds, r.Config.Masking.DefaultAction) == ActionRedact {
-				return ds.Name, true
-			}
-		}
-		return "", false
+	if len(rule.DataSources) == 0 && r.Config.Masking.DefaultAction == ActionRedact {
+		return "", true
 	}
-	for _, name := range rule.DataSources {
-		ds, ok := findDataSourceByName(r.Config.DataSources, name)
-		if !ok {
-			continue // 未定義の名前。internal/mask.New が別途弾く。
+	for _, ds := range r.Config.DataSources {
+		if len(rule.DataSources) > 0 && !slices.Contains(rule.DataSources, ds.Name) {
+			continue // このルールのスコープ外のデータソース。
 		}
 		if effectiveDefaultAction(ds, r.Config.Masking.DefaultAction) == ActionRedact {
 			return ds.Name, true
@@ -452,16 +444,6 @@ func effectiveDefaultAction(ds DataSource, global Action) Action {
 		return ds.DefaultAction
 	}
 	return global
-}
-
-// findDataSourceByName は名前でデータソースを引く。
-func findDataSourceByName(all []DataSource, name string) (DataSource, bool) {
-	for _, ds := range all {
-		if ds.Name == name {
-			return ds, true
-		}
-	}
-	return DataSource{}, false
 }
 
 // strictness は Action の厳しさを返す。大きいほど厳しい。

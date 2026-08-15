@@ -232,26 +232,28 @@ func TestResolve_マスクルールの由来を保持する(t *testing.T) {
 		t.Fatalf("rules = %d件, want 4件: %+v", len(rules), rules)
 	}
 
+	// 添字（インデックス）はそのまま union index。各行が要求する
+	// wantFileIndex とずれるのが、この検証の主眼。
 	tests := []struct {
-		unionIndex int
-		wantLayer  Layer
-		// wantFileIndex はファイル内での0始まりの位置。unionIndex とずれることを確かめる。
+		wantLayer Layer
+		// wantFileIndex はファイル内での0始まりの位置。union index（スライスの
+		// 位置そのもの）とずれることを確かめる。
 		wantFileIndex int
 	}{
-		{unionIndex: 0, wantLayer: LayerShared, wantFileIndex: 0},
-		{unionIndex: 1, wantLayer: LayerShared, wantFileIndex: 1},
-		{unionIndex: 2, wantLayer: LayerShared, wantFileIndex: 2},
+		{wantLayer: LayerShared, wantFileIndex: 0},
+		{wantLayer: LayerShared, wantFileIndex: 1},
+		{wantLayer: LayerShared, wantFileIndex: 2},
 		// union index は 3 だが、ローカルファイル内では0番目のルール。
-		{unionIndex: 3, wantLayer: LayerLocal, wantFileIndex: 0},
+		{wantLayer: LayerLocal, wantFileIndex: 0},
 	}
-	for _, tt := range tests {
-		origin := rules[tt.unionIndex].Origin
+	for i, tt := range tests {
+		origin := rules[i].Origin
 		if origin.layer != tt.wantLayer {
-			t.Errorf("rules[%d].Origin.layer = %v, want %v", tt.unionIndex, origin.layer, tt.wantLayer)
+			t.Errorf("rules[%d].Origin.layer = %v, want %v", i, origin.layer, tt.wantLayer)
 		}
 		if origin.index != tt.wantFileIndex {
 			t.Errorf("rules[%d].Origin.index = %d, want %d（union index の %d ではない）",
-				tt.unionIndex, origin.index, tt.wantFileIndex, tt.unionIndex)
+				i, origin.index, tt.wantFileIndex, i)
 		}
 	}
 }
