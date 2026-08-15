@@ -183,10 +183,14 @@ func defaultFake(t *testing.T) *fakeRedash {
 	}
 }
 
-// start は f を httptest で立て、それに向いた Client を返す。
-func start(t *testing.T, f *fakeRedash, mutate func(*Options)) *Client {
+// start は h を httptest で立て、それに向いた Client を返す。
+//
+// h は *fakeRedash に限らず任意の http.Handler を受け付ける。3段構えの
+// モックが要らない単発 GET のテスト（data_sources_test.go 等）は
+// http.HandlerFunc をそのまま渡せる。
+func start(t *testing.T, h http.Handler, mutate func(*Options)) *Client {
 	t.Helper()
-	srv := httptest.NewServer(f)
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
 	opts := Options{
