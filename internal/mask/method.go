@@ -31,30 +31,15 @@ const (
 
 // strength は method の強さを返す。大きいほど強い。
 //
-//	drop > redact > null > hash > partial > none
-//
-// ADR-0003 §7 の並びに null が無かったため、redact と hash の間に置いた。
-// 判断は docs/adr/0009-mask-null-strength.md にある。
+// 定義そのものは config.MaskMethod.Strength に集約してある。internal/config が
+// レビューされないルールの弱化を検査するのにも同じ順序が要るため、二重に
+// 持って片方だけ直すとずれる事故を避ける。
 //
 // 未知の値は 0 を返すが、New が弾くのでここには来ない。method を増やすときは
-// この関数と knownMethod の両方を直すこと。片方だけ直すと、新しい method が
-// 最も弱い扱いになって他のルールに負ける。
+// config.MaskMethod.Strength と knownMethod の両方を直すこと。片方だけ直すと、
+// 新しい method が最も弱い扱いになって他のルールに負ける。
 func strength(m config.MaskMethod) int {
-	switch m {
-	case config.MaskDrop:
-		return 5
-	case config.MaskRedact:
-		return 4
-	case config.MaskNull:
-		return 3
-	case config.MaskHash:
-		return 2
-	case config.MaskPartial:
-		return 1
-	case config.MaskNone:
-		return 0
-	}
-	return 0
+	return m.Strength()
 }
 
 // knownMethod は strength が強さを決められる method かを返す。

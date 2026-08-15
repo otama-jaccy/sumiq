@@ -20,6 +20,8 @@ import (
 // これに加えて、レビューされないレイヤ（ユーザ設定 / ローカル設定）には次の制約がかかる。
 //
 //	masking.rules の method: none     共有ファイルにのみ書ける。それ以外にあればエラー
+//	masking.rules の method の強さ    default_action: redact なスコープでは
+//	                                  redact 以上の強さが必要（下記参照）
 //	data_sources の差し替え           共有設定で定義済みの名前は上書きできない
 //	data_sources の id                共有設定で定義済みの id に別名を付けられない
 //	redash.api_key / api_key_command  git 管理下のファイルに書けない
@@ -29,6 +31,12 @@ import (
 // データソース単位の指定を厳格化方向にしか反映しない（fallbackMethod）ため、
 // レビュー済みの引き下げを許しても実行時には黙って無視され、「書いた設定が
 // 効かない」事故になる。
+//
+// masking.rules の method の強さも同じ理由で見る。method: none だけでなく、
+// partial / hash / null も redact より弱いため、default_action: redact な
+// スコープ（グローバルか、実効 default_action が redact なデータソース）に
+// マッチしうるルールでは、レビューされないレイヤは redact 以上の method
+// しか書けない。
 //
 // いずれも「ローカル設定でマスクが弱まらないこと」を構造で担保するためのもの。
 // 規則を足すときは、それが単調（fail-closed）かどうかを先に確かめること。
@@ -169,6 +177,9 @@ func merge(layers []layered) (*Resolved, error) {
 	if err := res.checkDataSourceIDs(); err != nil {
 		return nil, err
 	}
+	if err := res.checkMaskRuleWeakening(); err != nil {
+		return nil, err
+	}
 	res.Config.Version = SchemaVersion
 	res.keySource = keySrc
 	return res, nil
@@ -236,6 +247,9 @@ func (r *Resolved) mergeMasking(dst *Masking, l layered) error {
 				"マスクを外す指定はレビューの対象でなければなりません",
 				l.origin(), i, rule.Patterns, SharedFileName)
 		}
+		// Origin はエラーメッセージ用。union index ではなく、利用者が
+		// 開くファイルの何番目かを internal/mask 側で示せるようにする。
+		rule.Origin = RuleOrigin{layer: l.layer, path: l.path, index: i}
 		dst.Rules = append(dst.Rules, rule)
 	}
 	return nil
@@ -371,6 +385,83 @@ func (r *Resolved) checkDataSourceIDs() error {
 		}
 	}
 	return nil
+}
+
+// checkMaskRuleWeakening は、レビューされないレイヤのルールが実質的に
+// default_action: redact の allowlist 運用を弱めていないことを確かめる。
+//
+// mergeMasking は method: none だけを共有ファイル専用にしているが、それは
+// allowlist に穴を開める手段が method: none だけだと思っていたため。実際には
+// internal/mask はマッチしたルールを default_action より常に優先するので
+// （マッチ後の優劣は複数ルール同士でしか比べない）、partial / hash / null も
+// 「redact になるはずの列を弱い方法に差し替える」という同じ形で弱化になる。
+//
+// データソース単位の default_action は全レイヤを畳み終えるまで確定しない
+// （checkDataSourceActions と同じ理由）ため、merge のループの外で行う。
+func (r *Resolved) checkMaskRuleWeakening() error {
+	for _, rule := range r.Config.Masking.Rules {
+		if rule.Origin.layer.Reviewed() {
+			continue
+		}
+		if rule.Method.Strength() >= MaskRedact.Strength() {
+			continue // drop / redact は redact 以上に強いので弱化ではない。
+		}
+		if ds, redact := r.redactedScopeOf(rule); redact {
+			scope := "グローバル既定"
+			if ds != "" {
+				scope = fmt.Sprintf("データソース %q", ds)
+			}
+			return fmt.Errorf("%s %v: method: %q は %s の default_action: redact を弱めます。"+
+				"redact より弱い method（partial / hash / null / none）はレビューされる共有ファイル"+
+				"（%s）にのみ書けます", rule.Origin, rule.Patterns, rule.Method, scope, SharedFileName)
+		}
+	}
+	return nil
+}
+
+// redactedScopeOf は rule が適用されうる範囲に default_action: redact な
+// スコープがあるかを返す。あればそのデータソース名（グローバルなら空文字列）も返す。
+func (r *Resolved) redactedScopeOf(rule MaskRule) (string, bool) {
+	if len(rule.DataSources) == 0 {
+		if r.Config.Masking.DefaultAction == ActionRedact {
+			return "", true
+		}
+		for _, ds := range r.Config.DataSources {
+			if effectiveDefaultAction(ds, r.Config.Masking.DefaultAction) == ActionRedact {
+				return ds.Name, true
+			}
+		}
+		return "", false
+	}
+	for _, name := range rule.DataSources {
+		ds, ok := findDataSourceByName(r.Config.DataSources, name)
+		if !ok {
+			continue // 未定義の名前。internal/mask.New が別途弾く。
+		}
+		if effectiveDefaultAction(ds, r.Config.Masking.DefaultAction) == ActionRedact {
+			return ds.Name, true
+		}
+	}
+	return "", false
+}
+
+// effectiveDefaultAction はデータソース単位の default_action を、
+// 未指定ならグローバル既定を継承した実効値にする。
+func effectiveDefaultAction(ds DataSource, global Action) Action {
+	if ds.DefaultAction != "" {
+		return ds.DefaultAction
+	}
+	return global
+}
+
+// findDataSourceByName は名前でデータソースを引く。
+func findDataSourceByName(all []DataSource, name string) (DataSource, bool) {
+	for _, ds := range all {
+		if ds.Name == name {
+			return ds, true
+		}
+	}
+	return DataSource{}, false
 }
 
 // strictness は Action の厳しさを返す。大きいほど厳しい。
