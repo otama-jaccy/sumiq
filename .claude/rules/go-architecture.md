@@ -166,6 +166,22 @@ dec.UseNumber()   // これが無いと 9007199254740993 が 9007199254740992 �
 型を決めずに受ける場所（クエリ結果のセル等）では必ず立てる。
 立てたことに依存するコメントを書くなら、**どの関数が立てているかを名指しする。**
 
+### Redash の応答で bool に見えるフィールドを `bool` 型でそのまま受けない
+
+Redash のモデルは Python の `bool` を返しているとは限らない。`DataSource.paused`
+は `redis_connection.exists(...)` をそのまま返す実装で、redis-py の
+`Redis.exists()` は `bool` ではなく `int`（0 または 1）を返す（redis-py の
+`commands/core.py` の型注釈）。そのため JSON の応答は `"paused": true/false`
+ではなく `"paused": 0/1` という数値になり、Go 側で素朴に `bool` フィールドへ
+decode すると `json: cannot unmarshal number into ... of type bool` で落ちる
+（`internal/redash/data_sources.go` の `ListDataSources` で実機に対して踏んだ）。
+
+Redash のフィールドが Python のプロパティ実装依存で bool と数値のどちらを
+返すか確証が持てない場合は、素朴な `bool` ではなく、両方を読める decode を
+用意すること（`DataSource.UnmarshalJSON` / `pausedField` を参照）。
+モデル実装（`redash/models/__init__.py` 等）を確認せずに「bool のはず」と
+決め打ちしない。
+
 ### 外部から来た値を `url.JoinPath` にそのまま渡さない
 
 `url.JoinPath` は要素の中の `/` と `%` をエスケープせず、`..` を辿って詰める。
@@ -260,6 +276,43 @@ tabwriter は全 Unicode コードポイントを同じ幅として列幅を計�
 不可視のエスケープバイトもそのままセル幅に数えられ、列がずれる。TTY 向けの
 装飾は `tabwriter.Debug`（列の境界に `|` を挿む標準ライブラリの機能）のように
 セルの中身を変えない形で行う。
+
+### `redash.Client` に単発 GET のメソッドを足すなら、timeout の打ち切りを `classifyContextErr` に通す
+
+`internal/redash` の `do` は `context.WithTimeout` の締切超過を、通信そのものの
+失敗と区別せず `connectError` に包んで返す（実装のコメント参照）。`Execute` は
+締切超過を `classifyContextErr` に通し、呼び出し側のキャンセルと区別したうえで
+`*TimeoutError` に変換している。これを素通しすると、実際にはタイムアウトなのに
+「Redash への接続に失敗しました」という誤った文言になる（`ListDataSources` で
+一度踏んだ。[ADR-0014](../../docs/adr/0014-non-masked-output-formatters.md) の
+実装時に `/code-review` で検出）。
+
+```go
+// 悪い: do の締切超過エラーをそのまま返す
+func (c *Client) ListDataSources(ctx context.Context) ([]DataSource, error) {
+	execCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	var ds []DataSource
+	if err := c.do(execCtx, http.MethodGet, c.resolve("api", "data_sources"), nil, &ds); err != nil {
+		return nil, err // connectError のまま。締切超過も「接続失敗」と表示される
+	}
+	return ds, nil
+}
+
+// 良い: classifyContextErr で締切超過を *TimeoutError に変換する
+func (c *Client) ListDataSources(ctx context.Context) ([]DataSource, error) {
+	execCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	var ds []DataSource
+	if err := c.do(execCtx, http.MethodGet, c.resolve("api", "data_sources"), nil, &ds); err != nil {
+		return nil, c.classifyContextErr(ctx, execCtx, PhaseListDataSources, "", err)
+	}
+	return ds, nil
+}
+```
+
+3段構え（submit/wait/fetch）以外の単発 GET を足す場合も、専用の `Phase` を
+`errors.go` に追加し、`TimeoutError.Error()` にその段に合った文言を足すこと。
 
 ### 既存スライスを切り詰めて返すなら、3つ目のインデックスで cap を切る
 
@@ -360,6 +413,8 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
 - [ADR-0012](../../docs/adr/0012-poll-transient-retry.md): ポーリング中の一時的な失敗（接続失敗・429・5xx）のリトライ方針
 - [ADR-0013](../../docs/adr/0013-bounded-fetch.md): fetch の取得を打ち切り可能にする
   （上の「`json.Decoder` でストリーミング読みするなら」の背景）
+- [ADR-0014](../../docs/adr/0014-non-masked-output-formatters.md): マスク不要なコマンドは
+  `Render` を経由しない独立した formatter を持つ（上の「単発 GET の `classifyContextErr`」の背景）
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 
