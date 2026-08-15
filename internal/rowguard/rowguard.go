@@ -68,11 +68,15 @@ func ValidateQuery(q config.Query, ds config.DataSource) error {
 // 出力を中止したことを表す。
 type ExceededError struct {
 	MaxRows int
-	Got     int
+	// Got は確認できた行数。redash.Client.Execute は OOM を避けるため
+	// max_rows+1 件を超えた rows を保持しない（Issue #16）。そのため Got は
+	// 実際の総行数そのものではなく、「少なくともこの数だけある」という
+	// 観測値であることがある（上限に達したときは常に MaxRows+1 になる）。
+	Got int
 }
 
 func (e *ExceededError) Error() string {
-	return fmt.Sprintf("結果が %d 行あり、query.max_rows (%d) を超えています。"+
+	return fmt.Sprintf("結果が %d 行以上あり、query.max_rows (%d) を超えています。"+
 		"query.on_exceed: error のため出力を中止しました", e.Got, e.MaxRows)
 }
 
@@ -119,7 +123,7 @@ func Check(errW io.Writer, res *redash.Result, q config.Query, ds config.DataSou
 		// Rows が res.Rows と同じ配列を指したままになり、呼び出し側が戻り値に
 		// append すると capacity 内の書き込みが res.Rows 側にも及ぶ。
 		out := &redash.Result{Columns: res.Columns, Rows: res.Rows[:q.MaxRows:q.MaxRows]}
-		if _, err := fmt.Fprintf(errW, "Warning: 結果が %d 行あり、max_rows (%d) 件に切り詰めました\n",
+		if _, err := fmt.Fprintf(errW, "Warning: 結果が %d 行以上あり、max_rows (%d) 件に切り詰めました\n",
 			len(res.Rows), q.MaxRows); err != nil {
 			return nil, fmt.Errorf("rowguard: 切り詰めの警告を書き出せませんでした: %w", err)
 		}
