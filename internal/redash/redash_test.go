@@ -118,6 +118,25 @@ func (f *fakeRedash) postBody() []byte {
 	return append([]byte(nil), f.submitBody...)
 }
 
+// hijackAndClose は応答を返さずに接続を切る HandlerFunc を作る。
+//
+// LB のコネクションリセットや DNS の一時的な失敗など、HTTP 応答が
+// 返る前に接続そのものが失敗するケースを再現する。ハンドラはサーバ側の
+// 別ゴルーチンで動くため、testing.T の Fatal 系は使わず panic で落とす。
+func hijackAndClose() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			panic("ResponseWriter は http.Hijacker を満たしません")
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			panic(err)
+		}
+		_ = conn.Close()
+	}
+}
+
 // respond は status と本文を返す HandlerFunc を作る。
 func respond(status int, body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {

@@ -43,6 +43,24 @@ type queryRequest struct {
 // 保証できない。
 const maxAgeAlwaysExecute = 0
 
+// connectError は do がリクエストを送る前後で接続そのものに失敗したことを表す。
+// submit・wait・fetch のどの呼び出しでも起こりうる、do 共通の分類。
+//
+// 現状これを再試行の判定に使っているのは wait（isRetryableWaitErr）だけだが、
+// それは「投入・取得にも同じ方針を適用するか」を本 Issue のスコープ外とした
+// ためであり、この分類自体が wait 専用というわけではない。
+type connectError struct {
+	err error
+}
+
+func (e *connectError) Error() string {
+	return fmt.Sprintf("Redash への接続に失敗しました: %v", e.err)
+}
+
+func (e *connectError) Unwrap() error {
+	return e.err
+}
+
 // Execute はクエリを投入し、完了を待ち、結果を返す。
 //
 // ctx のキャンセルで中断できる。加えて Client.timeout を上限として、
@@ -112,6 +130,13 @@ func (c *Client) submit(ctx context.Context, q Query) (*job, error) {
 }
 
 // wait はジョブが完了するまでポーリングし、結果の ID を返す。
+//
+// GET /api/jobs/{id} が一時的な障害（接続失敗・429・5xx）で失敗しても、それだけで
+// ジョブを諦めない。GET は冪等でジョブ ID は検証済み、かつジョブは Redash 側で
+// 走り続けるため、同じ間隔で叩き直すのが安全。リトライに専用の
+// 上限は設けず、Execute が execCtx に設定した timeout まで続ける。
+// 認証・権限の失敗やその他の 4xx、ジョブ自体の失敗（finished が返すもの）は
+// 再試行しても状況が変わらないため対象にしない。
 func (c *Client) wait(ctx context.Context, jobID string, first *job) (int64, error) {
 	cur := first
 	for {
@@ -127,15 +152,50 @@ func (c *Client) wait(ctx context.Context, jobID string, first *job) (int64, err
 			return *cur.QueryResultID, nil
 		}
 
-		if err := sleep(ctx, c.pollInterval); err != nil {
-			return 0, err
-		}
-
-		cur, err = c.jobStatus(ctx, jobID)
+		cur, err = c.pollNext(ctx, jobID)
 		if err != nil {
 			return 0, err
 		}
 	}
+}
+
+// pollNext は poll_interval だけ待ってから GET /api/jobs/{id} を叩く。
+//
+// 一時的な障害（接続失敗・5xx）で失敗した場合は、cur を書き戻さずに
+// 同じ間隔でもう一度叩き直す。これにより wait 側は変化していない
+// 直前のジョブ状態を無駄に finished で再評価せずに済む。
+func (c *Client) pollNext(ctx context.Context, jobID string) (*job, error) {
+	for {
+		if err := sleep(ctx, c.pollInterval); err != nil {
+			return nil, err
+		}
+		next, err := c.jobStatus(ctx, jobID)
+		if err == nil {
+			return next, nil
+		}
+		if !isRetryableWaitErr(err) {
+			return nil, err
+		}
+	}
+}
+
+// isRetryableWaitErr は wait 内の GET /api/jobs/{id} の失敗を、ジョブを
+// 諦めずに叩き直してよい一時的な障害として扱うかを判定する。
+//
+// 対象は接続そのものの失敗（DNS・タイムアウト・コネクションリセット等、
+// connectError で包まれる）、429（レート制限）、5xx の APIError に限る。
+// AuthError（401/403/404 の認証扱い）やそれ以外の 4xx は再試行しても直らず、
+// 対象にすると本当の失敗の検知が遅れるだけになる。
+func isRetryableWaitErr(err error) bool {
+	var connErr *connectError
+	if errors.As(err, &connErr) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode >= 500
+	}
+	return false
 }
 
 // jobStatus は GET /api/jobs/{job_id} を1回叩く。
@@ -231,7 +291,11 @@ func (c *Client) do(ctx context.Context, method, url string, body []byte, dst an
 		// それ以外の err は *url.Error でメソッドと URL を含む。URL は検証済みの
 		// endpoint から組み立てたもので、クエリも認証情報も持たない。
 		// API KEY はヘッダにあるので出ない。リクエストのダンプも載せない。
-		return fmt.Errorf("Redash への接続に失敗しました: %w", err)
+		//
+		// connectError で包む。呼び出し元（今は wait だけ）はこれを見て
+		// 一時的な障害かどうかを判定できる（LB の瞬断や DNS の一時的な失敗を、
+		// 走り続けているジョブごと捨てないため）。
+		return &connectError{err: err}
 	}
 	defer func() {
 		// 本文を読み切らずに閉じると接続が再利用されない。エラー時は
