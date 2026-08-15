@@ -261,6 +261,43 @@ tabwriter は全 Unicode コードポイントを同じ幅として列幅を計�
 装飾は `tabwriter.Debug`（列の境界に `|` を挿む標準ライブラリの機能）のように
 セルの中身を変えない形で行う。
 
+### `redash.Client` に単発 GET のメソッドを足すなら、timeout の打ち切りを `classifyContextErr` に通す
+
+`internal/redash` の `do` は `context.WithTimeout` の締切超過を、通信そのものの
+失敗と区別せず `connectError` に包んで返す（実装のコメント参照）。`Execute` は
+締切超過を `classifyContextErr` に通し、呼び出し側のキャンセルと区別したうえで
+`*TimeoutError` に変換している。これを素通しすると、実際にはタイムアウトなのに
+「Redash への接続に失敗しました」という誤った文言になる（`ListDataSources` で
+一度踏んだ。[ADR-0013](../../docs/adr/0013-non-masked-output-formatters.md) の
+実装時に `/code-review` で検出）。
+
+```go
+// 悪い: do の締切超過エラーをそのまま返す
+func (c *Client) ListDataSources(ctx context.Context) ([]DataSource, error) {
+	execCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	var ds []DataSource
+	if err := c.do(execCtx, http.MethodGet, c.resolve("api", "data_sources"), nil, &ds); err != nil {
+		return nil, err // connectError のまま。締切超過も「接続失敗」と表示される
+	}
+	return ds, nil
+}
+
+// 良い: classifyContextErr で締切超過を *TimeoutError に変換する
+func (c *Client) ListDataSources(ctx context.Context) ([]DataSource, error) {
+	execCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	var ds []DataSource
+	if err := c.do(execCtx, http.MethodGet, c.resolve("api", "data_sources"), nil, &ds); err != nil {
+		return nil, c.classifyContextErr(ctx, execCtx, PhaseListDataSources, "", err)
+	}
+	return ds, nil
+}
+```
+
+3段構え（submit/wait/fetch）以外の単発 GET を足す場合も、専用の `Phase` を
+`errors.go` に追加し、`TimeoutError.Error()` にその段に合った文言を足すこと。
+
 ### 既存スライスを切り詰めて返すなら、3つ目のインデックスで cap を切る
 
 `s[:n]` は capacity を元のスライスから引き継ぐ。戻り値に別の要素を append すると、
@@ -339,6 +376,8 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
 - [ADR-0011](../../docs/adr/0011-partial-keep-options.md): `partial` の `keep` の仕様
   （上の「残す条件として書く」の背景）
 - [ADR-0012](../../docs/adr/0012-poll-transient-retry.md): ポーリング中の一時的な失敗（接続失敗・429・5xx）のリトライ方針
+- [ADR-0013](../../docs/adr/0013-non-masked-output-formatters.md): マスク不要なコマンドは
+  `Render` を経由しない独立した formatter を持つ（上の「単発 GET の `classifyContextErr`」の背景）
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 
