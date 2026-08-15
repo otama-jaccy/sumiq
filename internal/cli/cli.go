@@ -14,7 +14,8 @@ import (
 
 // CLI はコマンドツリーのルート。
 type CLI struct {
-	Query QueryCmd `cmd:"" help:"SQL を実行して結果を出力する"`
+	Query       QueryCmd       `cmd:"" help:"SQL を実行して結果を出力する"`
+	DataSources DataSourcesCmd `cmd:"" name:"data-sources" help:"Redash 上のデータソースを扱う"`
 }
 
 // Execute は args をパースし、選択されたコマンドの Run() に ctx と deps を注入して実行する。
