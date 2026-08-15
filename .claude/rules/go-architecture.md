@@ -278,6 +278,25 @@ out := src[:n:n]
 `max_rows` の truncate（`internal/rowguard`）のように、安全装置として入力の
 一部だけを新しい意味の値にして返す関数で踏みやすい。
 
+### `json.Decoder` でストリーミング読みするなら、キーの到達順に処理ロジックを依存させない
+
+JSON オブジェクトのキー順は仕様として保証されない。`encoding/json` を
+`Decoder.Token` で手動走査するとき、「このキーは先に来るはず」という前提で
+組むと、送信側の実装が変わる・別のシリアライザを経由する・プロキシが
+並べ替える、のいずれかでキー順が変わった応答を誤って壊れているとみなす。
+
+```go
+// 悪い: rows が columns より先に来る前提で、上限に達した時点で
+// 読むのをやめて接続を切る。columns がまだ来ていなければ、
+// 「columns がありません」と誤って落ちる。
+```
+
+一方のキーを先に処理し終える必要がある値（列名で行を射影する等）は、
+両方のキーを最後まで読み切ってから組み立てる。読み捨ててよい値は
+`any` ではなく `json.RawMessage` で受ける。ネストした map・slice・
+interface へ組み立てる分の割り当てを払わずに済む
+（[ADR-0013](../../docs/adr/0013-bounded-fetch.md)）。
+
 ## テスト
 
 - `internal/app` は kong に依存しないので、素の関数としてテーブルドリブンで検証する。
@@ -339,6 +358,8 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
 - [ADR-0011](../../docs/adr/0011-partial-keep-options.md): `partial` の `keep` の仕様
   （上の「残す条件として書く」の背景）
 - [ADR-0012](../../docs/adr/0012-poll-transient-retry.md): ポーリング中の一時的な失敗（接続失敗・429・5xx）のリトライ方針
+- [ADR-0013](../../docs/adr/0013-bounded-fetch.md): fetch の取得を打ち切り可能にする
+  （上の「`json.Decoder` でストリーミング読みするなら」の背景）
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 
