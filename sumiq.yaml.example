@@ -1,95 +1,110 @@
-# sumiq.yaml — 共有設定のサンプル。
+# sumiq.yaml — example shared configuration.
 #
-# このファイルは git にコミットする。API KEY のような秘密は書けない
-# （書くとロード時にエラーで停止する。README.md「API KEY」節を参照）。
+# This file is meant to be committed to git. Secrets such as API keys must not
+# be written here (doing so makes sumiq refuse to start at load time — see the
+# "API key" section in README.md).
 #
-# 使い方:
+# Usage:
 #   cp sumiq.yaml.example sumiq.yaml
-# としてから、自分のチームの Redash / データソース / マスク方針に書き換える。
+# then edit it to match your team's Redash instance, data sources, and
+# masking policy.
 #
-# マスクルールはこのファイル（共有設定）にのみ書き、レビューを通すこと。
-# sumiq.local.yaml から共有ルールを弱めることはできない（追加のみ許可）。
-# 詳細は docs/adr/0003-config-file-design.md を参照。
+# Masking rules must be written in this file (the shared config) only, and
+# reviewed like any other change. sumiq.local.yaml can only add rules on top,
+# never weaken them. See docs/adr/0003-config-file-design.md for details.
 
 version: 1
 
 redash:
   endpoint: https://redash.example.com
-  # ジョブ完了を待つ上限。ポーリングは poll_interval 間隔で行う。
+  # Upper bound on waiting for a job to finish. Polling happens every poll_interval.
   timeout: 300s
   poll_interval: 1s
-  # api_key はここに書かない。sumiq.local.yaml か環境変数 SUMIQ_REDASH_API_KEY を使う。
+  # Do not put api_key here. Use sumiq.local.yaml or the SUMIQ_REDASH_API_KEY
+  # environment variable instead.
 
-# sumiq query -d <name> の <name> で選べるデータソース。
-# CLI は名前のみ受け付け、数値 ID を直接指定することはできない。
+# Data sources selectable via `sumiq query -d <name>`.
+# The CLI only accepts names defined here — a numeric ID cannot be passed directly.
 data_sources:
   - name: analytics
     id: 3
-    description: "本番リードレプリカ。個人情報を含むため allowlist 運用にする"
-    # default_action: redact にすると、下の masking.rules にマッチしなかった列も
-    # 一律 **** になる（allowlist 運用）。method: none を書いた列だけが素通しになる。
+    description: "Production read replica. Contains PII, so run it as an allowlist."
+    # Setting default_action: redact masks (****) any column that doesn't match
+    # a rule below (allowlist mode). Only columns explicitly marked
+    # method: none pass through untouched.
     default_action: redact
 
   - name: sandbox
     id: 7
-    description: "検証用データソース。個人情報を含まない"
-    # データソース単位の auto_limit 上書きの例（README.md「auto_limit」節を参照）。
+    description: "Sandbox data source. Contains no PII."
+    # Example of overriding auto_limit per data source (see the "auto_limit"
+    # section in README.md).
     auto_limit: false
 
 query:
-  # auto_limit は最適化、max_rows が実際の安全装置（README.md「auto_limit」節を参照）。
+  # auto_limit is an optimization; max_rows is the actual safety net
+  # (see the "auto_limit" section in README.md).
   auto_limit: true
   max_rows: 1000
-  # max_rows 超過時の挙動。truncate は部分結果を全件と誤認する事故につながるため、
-  # 必要な場合のみ明示的に選ぶこと。
+  # What happens when max_rows is exceeded. `truncate` can lead to mistaking a
+  # partial result for the full result set, so opt into it explicitly only
+  # when you actually need it.
   on_exceed: error
 
 masking:
-  # このファイルにマッチしなかった列の既定の扱い。
-  # none: マッチした列だけマスクする（denylist）。redact: マッチしなかった列も **** にする（allowlist）。
-  # データソース単位で上書きできる（上の data_sources[].default_action）。
-  # ローカル設定からはここより緩い値に上書きできない。
+  # Default handling for columns that don't match any rule below.
+  # none: only matched columns are masked (denylist).
+  # redact: unmatched columns are masked too (****) (allowlist).
+  # Can be overridden per data source (data_sources[].default_action above).
+  # Local config cannot override this to a looser value.
   default_action: none
 
   rules:
-    # パターンは既定でグロブ（大文字小文字を無視、* は0文字以上の任意の並び、? は任意の1文字、
-    # / や改行もまたぐ）。標準の path.Match とは方言が異なり、[ を含むパターンはエラーになる
-    # （文字クラスとして読むか列名の文字として読むか曖昧なため）。列名の一部を選びたい場合は
-    # regex: 接頭辞で正規表現に切り替える。詳細は docs/adr/0010-mask-pattern-dialect.md を参照。
+    # Patterns are glob by default (case-insensitive; * matches any run of
+    # zero or more characters, including / and newlines; ? matches any single
+    # character). This is a different dialect from Go's path.Match — patterns
+    # containing `[` are rejected as an error, since it's ambiguous whether it
+    # should be read as a character class or a literal column-name character.
+    # To match part of a column name, switch to a regex with the `regex:`
+    # prefix instead. See docs/adr/0010-mask-pattern-dialect.md for details.
 
     - patterns: ["*email*"]
       method: partial
       keep: domain
-      note: "ドメインのみ残す。流入元の切り分けに使うため"
+      note: "Keep only the domain, used to distinguish traffic sources."
 
     - patterns: ["*phone*", "*tel*"]
-      # グロブは列名全体に一致する必要があるため "*tel" だと "tel_no" のような
-      # 列にはマッチしない。"*tel*" にして tel を含む列名を広く拾う
-      # （多少広すぎても、過剰にマスクする側の食い違いなので安全側に倒れる）。
+      # Globs must match the whole column name, so "*tel" alone would miss a
+      # column like "tel_no". Using "*tel*" catches any column name containing
+      # "tel" (being a bit too broad here just means over-masking, which is
+      # the safe direction to err on).
       method: redact
-      note: "電話番号は全件個人特定情報のため一律redact"
+      note: "Phone numbers are always PII, so redact unconditionally."
 
     - patterns: ["user_id", "customer_id"]
       method: hash
-      note: "同一実行内でのみ集計・JOINしたい。実行をまたいだ突き合わせは仕様上不可（README.md「hashのsalt」節を参照）"
+      note: "Only needed for counting/joins within a single run. Matching hashes across separate runs is not supported by design (see the 'hash salt' section in README.md)."
 
     - patterns: ["regex:^(first|last)_name$"]
       method: drop
-      note: "分析に使わないため列ごと出力しない"
+      note: "Not used in analysis, so drop the column entirely from output."
 
     - patterns: ["memo", "note"]
       method: redact
-      note: "自由記述は個人情報混入のリスクが高いため一律redact（analyticsのみ）"
+      note: "Free-text fields carry high risk of embedded PII, so redact unconditionally (analytics only)."
       data_sources: [analytics]
 
-    # allowlist 運用（analytics の default_action: redact）で、集計に必要な列だけを
-    # 明示的に通す例。method: none は共有ファイルにのみ書ける。regex: は使えないため
-    # 通したい列は1つずつグロブで挙げる（docs/adr/0010-mask-pattern-dialect.md §「regex: は
-    # method: none には書けない」を参照）。
+    # Example of allowlist mode (analytics' default_action: redact): explicitly
+    # let through only the columns needed for aggregation. method: none can
+    # only be written in the shared file. regex: is not allowed here, so list
+    # each allowed column individually with a glob (see
+    # docs/adr/0010-mask-pattern-dialect.md, "regex: cannot be used with
+    # method: none").
     - patterns: ["id", "created_at", "status"]
       method: none
-      note: "集計に必須かつ個人を特定できない列。allowlistに追加済み"
+      note: "Required for aggregation and not personally identifying. Added to the allowlist."
 
 output:
-  # table / json / csv。CLI の --format で毎回上書きできる（優先順位は CLI 引数が最も強い）。
+  # table / json / csv. Can be overridden per invocation with the CLI's
+  # --format flag (CLI flags take the highest precedence).
   format: table
