@@ -23,7 +23,12 @@ type InitParams struct {
 //
 // Force が無い場合、書き込み前に両方の存在を確認する。どちらか一方でも
 // 存在すればどちらのファイルにも書き込まずエラーで停止する。存在確認と
-// 書き込みを分離しているのは、片方だけ上書きされた状態を作らないため。
+// 書き込みを分離しているのは、既存ファイルが片方だけ上書きされた状態を
+// 作らないため。ディスクフルや権限変更のように書き込み自体が2回目で
+// 失敗するケースまでは保護しない（ロールバックしない）。その場合は
+// 1枚だけ新規作成された状態になるが、次回は --force を付けて再実行すれば
+// 揃う。
+
 func Init(deps Deps, p InitParams) error {
 	sharedPath := filepath.Join(deps.Dir, config.SharedFileName)
 	localPath := filepath.Join(deps.Dir, config.LocalFileName)
