@@ -1,6 +1,8 @@
 package mask
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -529,5 +531,55 @@ func TestNewRejects(t *testing.T) {
 				t.Errorf("エラー文 = %v, want %q を含む", err, tt.want)
 			}
 		})
+	}
+}
+
+// New が返すルールのエラーは、全レイヤの和集合での添字ではなく、
+// 利用者が開くファイルの何番目かを示すこと（#18）。
+//
+// 共有ファイルに正しいルールを1件、ローカルファイルに不正なパターンの
+// ルールを1件置く。和集合での添字は1（共有の後ろ）になるが、ローカル
+// ファイル自身の中では0番目のルールなので、エラーは「ローカル設定
+// (パス) の masking.rules[0]」を指すべきで、masking.rules[1] ではない。
+func TestNew_エラーはルールの由来を示す(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shared := "version: 1\n" +
+		"data_sources: [{name: analytics, id: 1}]\n" +
+		"masking:\n  rules:\n    - patterns: [\"ok\"]\n      method: redact\n"
+	if err := os.WriteFile(filepath.Join(dir, config.SharedFileName), []byte(shared), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	local := "version: 1\nmasking:\n  rules:\n    - patterns: [\"user[0-9]\"]\n      method: redact\n"
+	if err := os.WriteFile(filepath.Join(dir, config.LocalFileName), []byte(local), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := config.Resolve(config.Options{
+		Dir:            dir,
+		Environ:        []string{},
+		UserConfigPath: filepath.Join(dir, "does-not-exist", "config.yaml"),
+	})
+	if err != nil {
+		t.Fatalf("config.Resolve: %v", err)
+	}
+	if len(res.Config.Masking.Rules) != 2 {
+		t.Fatalf("rules = %d件, want 2件: %+v", len(res.Config.Masking.Rules), res.Config.Masking.Rules)
+	}
+
+	_, err = New(res.Config, "analytics")
+	if err == nil {
+		t.Fatal("New() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), config.LocalFileName) {
+		t.Errorf("error = %q, want に由来ファイル %q を含む", err.Error(), config.LocalFileName)
+	}
+	if !strings.Contains(err.Error(), "masking.rules[0]") {
+		t.Errorf("error = %q, want にファイル内での位置 masking.rules[0] を含む", err.Error())
+	}
+	if strings.Contains(err.Error(), "masking.rules[1]") {
+		t.Errorf("error = %q, 全レイヤの和集合での添字 masking.rules[1] を含むべきではない", err.Error())
 	}
 }
