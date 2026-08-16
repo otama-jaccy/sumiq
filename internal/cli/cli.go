@@ -14,6 +14,7 @@ import (
 
 // CLI はコマンドツリーのルート。
 type CLI struct {
+	Init        InitCmd        `cmd:"" help:"sumiq.yaml / sumiq.local.yaml の雛形をカレントディレクトリに作成する"`
 	Query       QueryCmd       `cmd:"" help:"SQL を実行して結果を出力する"`
 	DataSources DataSourcesCmd `cmd:"" name:"data-sources" help:"Redash 上のデータソースを扱う"`
 }
