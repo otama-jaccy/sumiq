@@ -41,8 +41,15 @@ go build -o sumiq ./cmd/sumiq
 
 ## Quick start
 
-1. Set up config files (see [Configuration](#configuration) below; the
-   fastest way is to just copy the two examples):
+1. Set up config files (see [Configuration](#configuration) below):
+
+   ```bash
+   sumiq init
+   ```
+
+   This creates `sumiq.yaml` and `sumiq.local.yaml` in the current directory
+   (see [`sumiq init`](#sumiq-init) below for details). Alternatively, copy
+   the two example files by hand:
 
    ```bash
    cp sumiq.yaml.example sumiq.yaml
@@ -100,12 +107,33 @@ closest one. In a monorepo with `sumiq.yaml` at both the repo root and
 `packages/etl/`, both are loaded and their masking rules are unioned.
 Passing `--config` explicitly skips this search (layers 2–4) entirely.
 
-Copy the two example files to get started (see [Quick start](#quick-start)):
+Run `sumiq init`, or copy the two example files by hand, to get started (see
+[Quick start](#quick-start)):
 
 - **`sumiq.yaml`** (shared config) — your Redash endpoint, data source
   definitions, and masking rules. Committed to git and reviewed by your team.
 - **`sumiq.local.yaml`** (local config) — your API key, plus any personal
   data sources or extra masking rules that only apply on your own machine.
+
+### `sumiq init`
+
+```bash
+sumiq init
+sumiq init --force
+```
+
+Creates `sumiq.yaml` and `sumiq.local.yaml` in the **current directory**
+(there's no option to target a different directory). Both files are always
+created together — you can't generate just one.
+
+- If either file already exists, `sumiq init` refuses to run and neither file
+  is written (no partial overwrite). The error names the file(s) in conflict.
+- `--force` overwrites both files. There's no per-file overwrite flag.
+- On success, next steps (setting up the API key, editing `sumiq.yaml`) are
+  printed to stderr, keeping stdout free for piping elsewhere.
+- If the current directory's `.gitignore` doesn't have a `sumiq.local.yaml`
+  entry, a warning is printed to stderr. **`sumiq init` never edits
+  `.gitignore` itself** — add the line by hand.
 
 ### Add `sumiq.local.yaml` to `.gitignore`
 
