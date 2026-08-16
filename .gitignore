@@ -13,12 +13,15 @@ coverage.*
 # 依存を vendor する場合は下行を外す
 # /vendor/
 
-# ローカル設定。API KEY を含むため絶対にコミットしない
-# 共有設定 sumiq.yaml はコミットする
+# このリポジトリ自身の動作確認用に置く設定ファイル。API KEY や実際の
+# エンドポイントを含みうるため絶対にコミットしない。
+# 利用者向けのテンプレートは sumiq.yaml.example / sumiq.local.yaml.example
+# としてコミットする。
 #
 # 先頭に / を付けない。設定はカレントから git root まで遡って探索するため、
 # サブディレクトリに置かれたものも読まれる。ルートだけを除外すると、
 # 読まれるのに ignore されないファイルができる
+sumiq.yaml
 sumiq.local.yaml
 
 # 環境依存

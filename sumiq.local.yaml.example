@@ -1,53 +1,61 @@
-# sumiq.local.yaml — ローカル設定のサンプル。
+# sumiq.local.yaml — example local configuration.
 #
-# このファイルは絶対にコミットしない（.gitignore に sumiq.local.yaml が
-# 登録済み。README.md「sumiq.local.yaml を .gitignore に入れる」節を参照）。
-# git 管理下のファイルに redash.api_key / api_key_command を書くと、
-# sumiq はロード時にエラーで停止する。書けないのではなく、書いても
-# 起動できない構造になっている。
+# Never commit this file (sumiq.local.yaml is already listed in .gitignore —
+# see the "add sumiq.local.yaml to .gitignore" section in README.md). Writing
+# redash.api_key / api_key_command into a file tracked by git makes sumiq
+# refuse to start at load time. It's not just a convention against writing it
+# there — the structure actively prevents startup if you do.
 #
-# 使い方:
+# Usage:
 #   cp sumiq.local.yaml.example sumiq.local.yaml
-# としてから、自分の環境に合わせて書き換える。
+# then edit it to match your own environment.
 
 version: 1
 
 redash:
-  # --- API KEY の取得方法は3つ。redash.api_key と redash.api_key_command は
-  #     同時には指定できない（両方書くとエラーになる）。いずれか1つを選ぶこと。
+  # --- There are three ways to provide the API key. redash.api_key and
+  #     redash.api_key_command are mutually exclusive (specifying both is an
+  #     error) — pick one.
 
-  # 方法1: 環境変数 SUMIQ_REDASH_API_KEY を直接使う（このファイルには何も書かない）。
+  # Option 1: use the SUMIQ_REDASH_API_KEY environment variable directly
+  #   (nothing to write in this file).
   #   export SUMIQ_REDASH_API_KEY=xxxxxxxx
-  # CI やワンショット実行に向く。最も設定が単純。
+  # Simplest option; good for CI and one-off runs.
 
-  # 方法2: このファイルに ${env:VAR} 参照を書く（下の行のコメントを外して使う）。
-  #   direnv 等でプロジェクトごとに環境変数を分けたい場合に使う。
-  #   ${env:...} 以外の書き方（$VAR 等）は展開されない。
+  # Option 2: reference ${env:VAR} in this file (uncomment the line below).
+  #   Useful when you want a different environment variable per project, e.g.
+  #   via direnv. Only the exact ${env:...} syntax is expanded — other forms
+  #   like $VAR are not.
   # api_key: ${env:REDASH_API_KEY}
 
-  # 方法3: 外部コマンドの標準出力を API KEY として使う（下の行のコメントを外して使う）。
-  #   1Password CLI や macOS Keychain 等のシークレットマネージャから取得する場合に使う。
-  #   30秒以内に標準出力へ1行で返すコマンドであること。対話的な認証を挟むコマンド
-  #   （ブラウザでの承認待ち等）は打ち切られて失敗する。
+  # Option 3: use the stdout of an external command as the API key (uncomment
+  #   the line below). Useful for pulling from a secrets manager such as the
+  #   1Password CLI or the macOS Keychain. The command must print a single
+  #   line to stdout within 30 seconds — a command that waits on interactive
+  #   auth (e.g. a browser approval prompt) will time out and fail.
   # api_key_command: ["op", "read", "op://Private/redash/credential"]
 
-  # 方法1（環境変数のみ）を使う場合、この Redash セクション自体を丸ごと省略してよい。
+  # If you're using option 1 (environment variable only), you can omit this
+  # entire redash section.
 
-# ローカルにだけ定義するデータソース（共有設定に無いものを追加できる）。
-# 追加は許可されるが、実行のたびに
-#   "Warning: my-sandbox はローカル定義です。マスク方針はレビューされていません。"
-# のような警告が出る。共有設定のマスクルールは必ず適用されるが、
-# default_action をローカル側でグローバルより緩くすることはできない。
+# Data sources defined only locally (in addition to whatever the shared
+# config defines). Adding one is allowed, but every run prints a warning like:
+#   "Warning: my-sandbox is a local data source. Its masking policy has not
+#   been reviewed."
+# Shared masking rules still always apply — local config cannot loosen
+# default_action below what the shared config sets.
 data_sources:
   - name: my-sandbox
     id: 99
 
 masking:
   rules:
-    # ローカルはマスクルールの「追加」のみできる。共有ルールの削除・弱化はできない
-    # （最終的な適用は全レイヤの和集合、同じ列に複数マッチしたら最も強い方法が勝つ）。
-    # method: none（明示的な許可）はここには書けない。allowlist の弱化になるため
-    # 共有ファイル（sumiq.yaml）にのみ書ける。
+    # Local config can only add masking rules on top of the shared ones — it
+    # cannot remove or weaken them (the rules that actually apply are the
+    # union across all layers, and when multiple rules match the same column
+    # the strongest method wins). method: none (an explicit allow) cannot be
+    # written here, since that would amount to weakening an allowlist — it can
+    # only be written in the shared file (sumiq.yaml).
     - patterns: ["internal_memo"]
       method: redact
-      note: "自分の手元データにのみ存在する列。チーム設定には無いので個別に追加"
+      note: "Column that only exists in my local data. Not in the team config, so added individually here."
