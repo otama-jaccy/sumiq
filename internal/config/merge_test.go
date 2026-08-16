@@ -56,6 +56,18 @@ func mustResolve(t *testing.T, f layerFiles) *Resolved {
 	return res
 }
 
+// stripOrigins はルールの由来（ファイルパスを含む）を比較対象から外す。
+// パスはテストごとの一時ディレクトリで変わるため、由来そのものは
+// 別のテスト（Origin を明示的に検証するテスト）に任せる。
+func stripOrigins(rules []MaskRule) []MaskRule {
+	out := make([]MaskRule, len(rules))
+	for i, r := range rules {
+		r.Origin = RuleOrigin{}
+		out[i] = r
+	}
+	return out
+}
+
 func wantError(t *testing.T, f layerFiles, msg string) {
 	t.Helper()
 	res, err := resolveWith(t, f)
@@ -194,8 +206,55 @@ func TestResolve_マスクルールは和集合(t *testing.T) {
 		{Patterns: []string{"s"}, Method: MaskRedact},
 		{Patterns: []string{"l"}, Method: MaskDrop},
 	}
-	if !reflect.DeepEqual(res.Config.Masking.Rules, want) {
-		t.Errorf("rules = %+v\nwant %+v", res.Config.Masking.Rules, want)
+	if got := stripOrigins(res.Config.Masking.Rules); !reflect.DeepEqual(got, want) {
+		t.Errorf("rules = %+v\nwant %+v", got, want)
+	}
+}
+
+// マージ後もルールの由来（レイヤ・ファイル・ファイル内での位置）が残ること。
+//
+// internal/mask がルールのエラーを出すとき、全レイヤの和集合での添字ではなく
+// 「利用者が開くファイルの何番目か」を示せるようにするために必要（#18）。
+// 共有ファイルの2件目・3件目のルールが、それぞれ union index ではなく
+// ファイル内での位置（1・2）を保持していることを確かめる。
+func TestResolve_マスクルールの由来を保持する(t *testing.T) {
+	res := mustResolve(t, layerFiles{
+		shared: "version: 1\nmasking:\n  rules:\n" +
+			"    - patterns: [a]\n      method: redact\n" +
+			"    - patterns: [b]\n      method: redact\n" +
+			"    - patterns: [c]\n      method: redact\n",
+		local: "version: 1\nmasking:\n  rules:\n" +
+			"    - patterns: [d]\n      method: redact\n",
+	})
+
+	rules := res.Config.Masking.Rules
+	if len(rules) != 4 {
+		t.Fatalf("rules = %d件, want 4件: %+v", len(rules), rules)
+	}
+
+	// 添字（インデックス）はそのまま union index。各行が要求する
+	// wantFileIndex とずれるのが、この検証の主眼。
+	tests := []struct {
+		wantLayer Layer
+		// wantFileIndex はファイル内での0始まりの位置。union index（スライスの
+		// 位置そのもの）とずれることを確かめる。
+		wantFileIndex int
+	}{
+		{wantLayer: LayerShared, wantFileIndex: 0},
+		{wantLayer: LayerShared, wantFileIndex: 1},
+		{wantLayer: LayerShared, wantFileIndex: 2},
+		// union index は 3 だが、ローカルファイル内では0番目のルール。
+		{wantLayer: LayerLocal, wantFileIndex: 0},
+	}
+	for i, tt := range tests {
+		origin := rules[i].Origin
+		if origin.layer != tt.wantLayer {
+			t.Errorf("rules[%d].Origin.layer = %v, want %v", i, origin.layer, tt.wantLayer)
+		}
+		if origin.index != tt.wantFileIndex {
+			t.Errorf("rules[%d].Origin.index = %d, want %d（union index の %d ではない）",
+				i, origin.index, tt.wantFileIndex, i)
+		}
 	}
 }
 
@@ -320,6 +379,99 @@ func TestResolve_MethodNoneは共有ファイル専用(t *testing.T) {
 	}
 }
 
+// method: none だけでなく、redact より弱い method（partial / hash / null）も
+// allowlist 運用（default_action: redact）に穴を開ける。レビューされない
+// レイヤからは、redact になるはずの列を弱い method に差し替えられない（#18）。
+func TestResolve_Redactより弱いMethodは共有ファイル専用(t *testing.T) {
+	tests := []struct {
+		name    string
+		files   layerFiles
+		wantErr string
+	}{
+		{
+			name: "ローカルの partial はグローバル redact 下でエラー",
+			files: layerFiles{
+				shared: "version: 1\nmasking: {default_action: redact}\n",
+				local:  "version: 1\nmasking:\n  rules:\n    - patterns: [\"a\"]\n      method: partial\n      keep_prefix: 2\n",
+			},
+			wantErr: "default_action: redact を弱めます",
+		},
+		{
+			name: "ユーザ設定の hash もグローバル redact 下でエラー",
+			files: layerFiles{
+				shared: "version: 1\nmasking: {default_action: redact}\n",
+				user:   "version: 1\nmasking:\n  rules:\n    - patterns: [\"a\"]\n      method: hash\n",
+			},
+			wantErr: "default_action: redact を弱めます",
+		},
+		{
+			name: "ローカルの null もグローバル redact 下でエラー",
+			files: layerFiles{
+				shared: "version: 1\nmasking: {default_action: redact}\n",
+				local:  "version: 1\nmasking:\n  rules:\n    - patterns: [\"a\"]\n      method: \"null\"\n",
+			},
+			wantErr: "default_action: redact を弱めます",
+		},
+		{
+			// redact 以上の強さ（redact 自身・drop）は弱化ではないので通る。
+			name: "ローカルの drop はグローバル redact 下でも通る",
+			files: layerFiles{
+				shared: "version: 1\nmasking: {default_action: redact}\n",
+				local:  "version: 1\nmasking:\n  rules:\n    - patterns: [\"a\"]\n      method: drop\n",
+			},
+		},
+		{
+			// default_action: none（denylist）の下では、弱い method を書いても
+			// 「本来 **** だったはずの列」が存在しないので弱化にならない。
+			name: "グローバルが none なら弱い method でも通る",
+			files: layerFiles{
+				local: "version: 1\nmasking:\n  rules:\n    - patterns: [\"a\"]\n      method: partial\n      keep_prefix: 2\n",
+			},
+		},
+		{
+			// 共有ファイルは元々レビュー対象なので許す。ADR-0003 §3 の
+			// allowlist サンプルそのもの。
+			name: "共有ファイルの partial は通る",
+			files: layerFiles{
+				shared: "version: 1\nmasking:\n  default_action: redact\n  rules:\n    - patterns: [\"a\"]\n      method: partial\n      keep_prefix: 2\n",
+			},
+		},
+		{
+			// グローバルは none でも、データソース単位で redact に引き上げた
+			// スコープに掛かるルールは同じ理由で弱化になる。
+			name: "データソース単位で引き上げた redact にも及ぶ",
+			files: layerFiles{
+				shared: "version: 1\ndata_sources: [{name: sandbox, id: 9, default_action: redact}]\n",
+				local: "version: 1\nmasking:\n  rules:\n    - patterns: [\"a\"]\n      method: hash\n" +
+					"      data_sources: [sandbox]\n",
+			},
+			wantErr: "データソース \"sandbox\" の default_action: redact を弱めます",
+		},
+		{
+			// 他のデータソースにしかスコープしていないルールは、そのデータソースの
+			// 実効 default_action で判定する。グローバルは none のまま sandbox
+			// だけを redact に引き上げた構成で、そのスコープ外（other）にしか
+			// 掛からないルールは弱化にならないので通る。
+			name: "スコープ先が redact でなければ通る",
+			files: layerFiles{
+				shared: "version: 1\ndata_sources: [{name: sandbox, id: 9, default_action: redact}, {name: other, id: 8}]\n",
+				local: "version: 1\nmasking:\n  rules:\n    - patterns: [\"a\"]\n      method: hash\n" +
+					"      data_sources: [other]\n",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wantErr != "" {
+				wantError(t, tt.files, tt.wantErr)
+				return
+			}
+			mustResolve(t, tt.files)
+		})
+	}
+}
+
 func TestResolve_データソースの由来を保持する(t *testing.T) {
 	res := mustResolve(t, layerFiles{
 		user:   "version: 1\ndata_sources: [{name: from-user, id: 1}]\n",
@@ -434,7 +586,9 @@ func TestResolve_データソースの再定義(t *testing.T) {
 	}
 }
 
-// ローカル定義のデータソースは、グローバル既定より緩い default_action を持てない。
+// データソースは、レイヤに関わらずグローバル既定より緩い default_action を持てない。
+// 共有ファイルの定義も対象（#18）。internal/mask が厳格化方向にしか反映しないため、
+// レビュー済みの引き下げを config が許しても実行時には黙って無視されてしまう。
 func TestResolve_ローカルデータソースのDefaultAction(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -478,13 +632,13 @@ func TestResolve_ローカルデータソースのDefaultAction(t *testing.T) {
 			},
 		},
 		{
-			// 共有ファイルは対象外。ADR-0003 §8 はグローバルを緩く保ったまま
-			// データソース単位で上げる運用を前提にしており、レビュー済みの
-			// 引き下げまで禁じるとその自由度を失う。
-			name: "共有ファイルの定義は対象外",
-			files: layerFiles{
-				shared: "version: 1\nmasking: {default_action: redact}\ndata_sources: [{name: sandbox, id: 9, default_action: none}]\n",
-			},
+			// 共有ファイルの定義もグローバルより緩くはできない。internal/mask は
+			// データソース単位の指定を厳格化方向にしか反映しないため、レビュー済みの
+			// 引き下げを config が許しても実行時には黙って無視される
+			// （書いた設定が効かない事故になる。ADR-0015 参照）。
+			name:    "共有ファイルの定義も対象",
+			files:   layerFiles{shared: "version: 1\nmasking: {default_action: redact}\ndata_sources: [{name: sandbox, id: 9, default_action: none}]\n"},
+			wantErr: "より緩いため指定できません",
 		},
 		{
 			// 判定はグローバル既定を全部畳んだ後で行う。ローカルの方が先に
@@ -677,10 +831,14 @@ masking:
 			wantErr: "別名を付けることはできません",
 		},
 		{
-			// これはエラーにならない。ルールが上書きされず和集合になることで、
-			// 共有の drop が残ることをもって「弱まっていない」とする。
-			name:  "ローカルから同じパターンを弱い method で再定義する",
-			files: layerFiles{shared: shared, local: "version: 1\nmasking:\n  rules:\n    - patterns: [\"*email*\"]\n      method: partial\n"},
+			// #18 以前は「和集合になり共有の drop が残るのでエラーにしない」
+			// としていたが、それは patterns がたまたま完全一致する場合にしか
+			// 成り立たない。パターンが違えば、ローカルの弱い method だけが
+			// マッチする列が出うる。redact 運用下で redact より弱い method は
+			// 常に弾く。
+			name:    "ローカルから同じパターンを弱い method で再定義する",
+			files:   layerFiles{shared: shared, local: "version: 1\nmasking:\n  rules:\n    - patterns: [\"*email*\"]\n      method: partial\n"},
+			wantErr: "default_action: redact を弱めます",
 		},
 	}
 
@@ -764,8 +922,10 @@ masking:
 		},
 		Output: Output{Format: FormatJSON},
 	}
-	if !reflect.DeepEqual(res.Config, want) {
-		t.Errorf("Config = %+v\nwant %+v", res.Config, want)
+	got := res.Config
+	got.Masking.Rules = stripOrigins(got.Masking.Rules)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Config = %+v\nwant %+v", got, want)
 	}
 }
 

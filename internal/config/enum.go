@@ -32,6 +32,32 @@ func maskMethods() []MaskMethod {
 	return []MaskMethod{MaskNone, MaskPartial, MaskHash, MaskNull, MaskRedact, MaskDrop}
 }
 
+// Strength は method の強さを返す。大きいほど強い。
+//
+//	drop > redact > null > hash > partial > none
+//
+// internal/mask がマッチした複数ルールの優劣を決めるのと、internal/config が
+// レビューされないルールの弱化を検査するのとで、同じ順序を二重に持つと
+// 片方だけ直したときにずれる。判定はここ1箇所に集約する。
+// 並び順の根拠は docs/adr/0009-mask-null-strength.md。
+func (m MaskMethod) Strength() int {
+	switch m {
+	case MaskDrop:
+		return 5
+	case MaskRedact:
+		return 4
+	case MaskNull:
+		return 3
+	case MaskHash:
+		return 2
+	case MaskPartial:
+		return 1
+	case MaskNone:
+		return 0
+	}
+	return 0
+}
+
 // UnmarshalYAML は不正な値を行番号付きで弾く。
 func (m *MaskMethod) UnmarshalYAML(n *yaml.Node) error {
 	return unmarshalEnum(n, "method", maskMethods(), m)
