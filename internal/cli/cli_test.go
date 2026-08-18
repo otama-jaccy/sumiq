@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/alecthomas/kong"
 
 	"github.com/otama-jaccy/sumiq/internal/app"
+	"github.com/otama-jaccy/sumiq/internal/config"
 )
 
 // kong のタグは型のない文字列 DSL で、検証は実行時にしか効かない
@@ -81,5 +84,46 @@ func TestQueryCmd_Run_DelegatesToApp(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "redash.endpoint") {
 		t.Errorf("app.Resolved.Validate() 由来のエラーではないようです: %v", err)
+	}
+}
+
+func TestInitCmd_ForceDefaultsFalse(t *testing.T) {
+	parser, c := newParser(t)
+	if _, err := parser.Parse([]string{"init"}); err != nil {
+		t.Fatalf("Parse() 失敗: %v", err)
+	}
+	if c.Init.Force {
+		t.Error("Force の既定値が false ではありません")
+	}
+}
+
+func TestInitCmd_ForceFlagParsesAsBool(t *testing.T) {
+	parser, c := newParser(t)
+	if _, err := parser.Parse([]string{"init", "--force"}); err != nil {
+		t.Fatalf("Parse() 失敗: %v", err)
+	}
+	if !c.Init.Force {
+		t.Error("--force が Force に詰め替わっていません")
+	}
+}
+
+func TestInitCmd_Run_DelegatesToApp(t *testing.T) {
+	// Run() が詰め替えのみで internal/app に処理を委ねていることを、
+	// deps.Dir 配下に app.Init が作るはずのファイルが実際に作られることから確認する。
+	dir := t.TempDir()
+	deps := &app.Deps{
+		Out:     &bytes.Buffer{},
+		Err:     &bytes.Buffer{},
+		Dir:     dir,
+		Environ: []string{},
+	}
+	if err := Execute(context.Background(), []string{"init"}, deps); err != nil {
+		t.Fatalf("Execute() 失敗: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.SharedFileName)); err != nil {
+		t.Errorf("%s が作成されていません（app.Init に委譲されていない可能性）: %v", config.SharedFileName, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.LocalFileName)); err != nil {
+		t.Errorf("%s が作成されていません（app.Init に委譲されていない可能性）: %v", config.LocalFileName, err)
 	}
 }
