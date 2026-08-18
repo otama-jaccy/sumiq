@@ -125,6 +125,27 @@ func TestAnalyzeSources(t *testing.T) {
 			want: map[string][]string{"a": {"email", "id"}},
 		},
 		{
+			// extract / trim / substring / overlay の FROM は句ではなく引数の
+			// 区切り。サブクエリのテーブル名と同じ扱いで捨てると、
+			// 別名が付いていて判定不能にもならないまま伝播が落ちる。
+			name: "関数の引数リストの中の FROM は区切りとして読む",
+			sql:  "SELECT extract(year FROM birth_date) AS y FROM u",
+			cols: []string{"y"},
+			want: map[string][]string{"y": {"birth_date", "year"}},
+		},
+		{
+			name: "trim の FROM も区切りとして読む",
+			sql:  "SELECT trim(both ' ' FROM full_name) AS n FROM u",
+			cols: []string{"n"},
+			want: map[string][]string{"n": {"both", "full_name"}},
+		},
+		{
+			name: "サブクエリのテーブル名は由来にしない",
+			sql:  "SELECT (SELECT max(email) FROM users) AS m FROM t",
+			cols: []string{"m"},
+			want: map[string][]string{"m": {"email"}},
+		},
+		{
 			name: "式の中の複数の列",
 			sql:  "SELECT concat(first_name, last_name) AS full_name FROM t",
 			cols: []string{"full_name"},
@@ -266,6 +287,51 @@ func TestAnalyzeRecursiveCTEStops(t *testing.T) {
 	}
 }
 
+// TestAnalyzeIgnoresSubqueriesOutsideSelectList は、結果列にならない
+// サブクエリの中の別名の無い式で判定不能にならないことを見る。
+//
+// WHERE / HAVING / ON の中のサブクエリは結果列を作らないため、出力名が
+// 分からなくてもマスクが外れる経路にならない。ここで判定不能にすると、
+// 既定の alias_guard: strict がごく普通の SQL を拒否する。
+func TestAnalyzeIgnoresSubqueriesOutsideSelectList(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"WHERE の IN サブクエリ", "SELECT id FROM t WHERE x IN (SELECT lower(email) FROM u)"},
+		{"WHERE の EXISTS サブクエリ", "SELECT id FROM t WHERE EXISTS (SELECT upper(email) FROM u)"},
+		{"HAVING のスカラーサブクエリ",
+			"SELECT id FROM t GROUP BY id HAVING max(z) > (SELECT avg(v) + 1 FROM u)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := analyze(t, tt.sql)
+			if _, u := a.Columns([]string{"id"}); u != nil {
+				t.Errorf("判定不能になりました: %v", u)
+			}
+		})
+	}
+}
+
+// TestAnalyzeExemptionsFollowTheClosure は、許可関数の引数がさらに別名だった
+// 場合に、止まった元の列まで辿れることを見る。
+//
+// 辿らないと「count が止めたのは contact」までしか分からず、contact に
+// ルールが無ければ弱化が起きたことを通知に出せない。
+func TestAnalyzeExemptionsFollowTheClosure(t *testing.T) {
+	a := analyze(t, "WITH u AS (SELECT email AS contact FROM users) "+
+		"SELECT count(contact) AS n FROM u", "count")
+
+	want := []Exemption{
+		{Function: "count", Column: "contact"},
+		{Function: "count", Column: "email"},
+	}
+	if got := columns(t, a, []string{"n"})[0].Exemptions; !reflect.DeepEqual(got, want) {
+		t.Errorf("伝播を止めた列 = %+v, want %+v", got, want)
+	}
+}
+
 func TestAnalyzeUndetermined(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -338,6 +404,30 @@ func TestAnalyzeUndetermined(t *testing.T) {
 			detail: "*",
 		},
 		{
+			// 列別名リストは出力列を丸ごと改名するが、改名後の名前は内側の
+			// SELECT のどこにも現れない。読めたことにすると、内側の列に
+			// 掛けたルールが黙って届かなくなる。
+			name:   "CTE の列別名リスト",
+			sql:    "WITH q(c) AS (SELECT email FROM t) SELECT c FROM q",
+			cols:   []string{"c"},
+			want:   ReasonUnknownOutput,
+			detail: "列別名リスト",
+		},
+		{
+			name:   "派生テーブルの列別名リスト",
+			sql:    "SELECT c FROM (SELECT email FROM t) x(c)",
+			cols:   []string{"c"},
+			want:   ReasonUnknownOutput,
+			detail: "列別名リスト",
+		},
+		{
+			name:   "UNNEST の列別名リスト",
+			sql:    "SELECT v FROM t CROSS JOIN UNNEST(arr) AS u(v)",
+			cols:   []string{"v"},
+			want:   ReasonUnknownOutput,
+			detail: "列別名リスト",
+		},
+		{
 			name:   "内側の SELECT に別名の無い式がある",
 			sql:    "SELECT x FROM (SELECT upper(email) AS x, lower(phone) FROM t) s",
 			cols:   []string{"x"},
@@ -401,6 +491,31 @@ func TestColumnsAlwaysMatchesLength(t *testing.T) {
 		if len(origins) != len(cols) {
 			t.Errorf("%q: len(origins) = %d, want %d", sql, len(origins), len(cols))
 		}
+	}
+}
+
+// TestAnalyzeDoesNotSeeColumnAliasList は、列別名リストと形の似た並びを
+// 誤検出しないことを見る。誤検出すると alias_guard: strict が普通の SQL を拒否する。
+func TestAnalyzeDoesNotSeeColumnAliasList(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"識別子だけを取る関数", "SELECT coalesce(first_name, last_name) AS n FROM t"},
+		{"窓関数の OVER 句", "SELECT count(x) OVER (PARTITION BY a) AS n FROM t"},
+		{"FILTER 句", "SELECT count(x) FILTER (WHERE flag) AS n FROM t"},
+		{"サブクエリの後ろの関数呼び出し",
+			"SELECT n FROM (SELECT 1 AS n) t WHERE upper(a) = upper(b)"},
+		{"LATERAL の関数呼び出し",
+			"SELECT v FROM (SELECT 1 AS v) t, LATERAL flatten(arr)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if u := Analyze(tt.sql, nil).Undetermined(); u != nil {
+				t.Errorf("判定不能になりました: %v", u)
+			}
+		})
 	}
 }
 

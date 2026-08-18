@@ -41,8 +41,9 @@ data_sources:
     # sumiq traces where each result column comes from, so that renaming a
     # column (SELECT email AS contact) doesn't drop its mask. When the query
     # can't be traced at all — it contains no SELECT (non-SQL query runners,
-    # SHOW / CALL), can't be read, or has an expression whose output name
-    # can't be determined — sumiq refuses to run it (alias_guard: strict, the
+    # SHOW / CALL), can't be read, has an expression whose output name can't
+    # be determined, or renames columns with a column alias list such as
+    # WITH q(c) AS (...) — sumiq refuses to run it (alias_guard: strict, the
     # default). Set alias_guard: off for data sources where that happens by
     # nature; propagation still applies to whatever was analyzed. Only this
     # file (the shared config) may set it to off.

@@ -208,7 +208,7 @@ SELECT contact AS c2 FROM u
 on stderr says where it came from:
 
 ```
-Masked: c2 (redact, contact 由来)
+Masked: c2 (redact, email 由来)
 ```
 
 Two things follow from how this is built:
@@ -226,11 +226,21 @@ Two things follow from how this is built:
 
 #### `alias_guard` — queries whose columns can't be traced
 
-When the SQL can't be read (unbalanced quotes / comments / parens, multiple
-statements), contains no `SELECT` at all (non-SQL query runners, `SHOW`,
-`CALL`), or contains an expression whose output name can't be determined and
-can't be matched positionally either, sumiq **refuses to run it and never
-sends a request to Redash.** Loosen that per data source:
+sumiq **refuses to run a query and never sends a request to Redash** when it
+can't trace the result columns back to their sources:
+
+- the SQL can't be read (unbalanced quotes / comments / parens, multiple
+  statements, or a string literal whose end depends on the dialect);
+- it contains no `SELECT` at all (non-SQL query runners, `SHOW`, `CALL`);
+- an expression has no determinable output name and can't be matched
+  positionally either (the item count doesn't equal the result column count,
+  or the select list also contains `*`);
+- a column alias list renames the columns — `WITH q(c) AS (...)`,
+  `(...) AS x(c)`, `CROSS JOIN UNNEST(arr) AS t(v)`. The new name appears
+  nowhere inside the inner `SELECT`, so there is nothing to trace it to. Name
+  the columns with `AS` inside the inner `SELECT` instead.
+
+Loosen that per data source:
 
 ```yaml
 data_sources:

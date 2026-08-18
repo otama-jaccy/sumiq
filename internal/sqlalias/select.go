@@ -9,6 +9,11 @@ type selectList struct {
 	depth int
 	// keyword は SELECT キーワードの token 位置。
 	keyword int
+	// context は SELECT を囲む括弧の直前の語（小文字化）。括弧の外なら空。
+	//
+	// この SELECT の出力列が外側から名前で参照されうるか（CTE の本体か、
+	// FROM 句の派生テーブルか）を見分けるために持つ。
+	context string
 	// start / end は select list（SELECT の次から FROM 等の直前まで）の token 範囲。
 	//
 	// 別の SELECT がこの範囲の中にあれば、その SELECT はスカラーサブクエリと
@@ -61,13 +66,49 @@ func selects(toks []token, exempt map[string]string) []selectList {
 			continue // t.select のように修飾された識別子。
 		}
 		end := selectListEndIndex(toks, i)
-		list := selectList{depth: t.depth, keyword: i, start: i + 1, end: end}
+		list := selectList{
+			depth:   t.depth,
+			context: selectContext(toks, i),
+			keyword: i,
+			start:   i + 1,
+			end:     end,
+		}
 		for _, part := range splitItems(toks[i+1:end], t.depth) {
 			list.items = append(list.items, parseItem(part, t.depth, exempt))
 		}
 		out = append(out, list)
 	}
 	return out
+}
+
+// selectContext は start にある SELECT を囲む括弧の直前の語を返す。
+// 括弧の外にある（最も外側の）SELECT なら空を返す。
+func selectContext(toks []token, start int) string {
+	depth := toks[start].depth
+	if depth == 0 {
+		return ""
+	}
+	// SELECT と囲む開き括弧の間の token はすべて depth 以上。逆向きに辿って
+	// 最初に depth を下回るのが、その開き括弧そのもの。
+	for j := start - 1; j >= 0; j-- {
+		if toks[j].depth >= depth {
+			continue
+		}
+		if j == 0 || toks[j].kind != kindPunct || toks[j].text != "(" {
+			return ""
+		}
+		return fold(toks[j-1].text)
+	}
+	return ""
+}
+
+// namedOutput は、SELECT の出力列が外側から名前で参照されうる文脈。
+//
+// CTE の本体（AS の後ろ）と FROM 句の派生テーブルだけが、外側から列名で
+// 引かれる。WHERE / HAVING / ON の中のサブクエリは結果列にならないため、
+// 出力名が分からなくてもマスクが外れる経路にならない。
+var namedOutput = map[string]bool{
+	"as": true, "from": true, "join": true, "lateral": true, ",": true,
 }
 
 // selectListEndIndex は start にある SELECT の select list が終わる位置を返す。
@@ -154,6 +195,76 @@ func skipGroup(toks []token, depth int) []token {
 		}
 	}
 	return nil
+}
+
+// columnAliasList は列別名リストがあれば、その名前を返す。
+//
+//	WITH q(c1, c2) AS (SELECT ...)      CTE の列別名リスト
+//	FROM (SELECT ...) x(c1, c2)         派生テーブルの列別名リスト
+//	CROSS JOIN UNNEST(arr) AS t(v)      同じ形
+//
+// この形は出力列を丸ごと改名するが、内側の SELECT には改名後の名前が
+// どこにも現れない。位置で対応させるには「どの CTE / 派生テーブルの何番目か」を
+// 辿る必要があり、スコープを潰す解析では追えない。読めたことにせず、
+// 呼び出し側に判定不能として返すための検出。
+func columnAliasList(toks []token) (string, bool) {
+	for i, t := range toks {
+		if t.kind != kindPunct || t.text != "(" {
+			continue
+		}
+		// 直前が識別子（CTE 名・派生テーブルの別名）であること。キーワードは
+		// 除く。OVER (PARTITION BY a) や FILTER (WHERE ...) を数えない。
+		if i == 0 || toks[i-1].kind != kindIdent || keywords[fold(toks[i-1].text)] {
+			continue
+		}
+		end, ok := identListEnd(toks, i)
+		if !ok {
+			continue
+		}
+		name := toks[i-1].text
+		// WITH q(c) AS ( ... の形。
+		if end+2 < len(toks) && toks[end+1].kind == kindIdent &&
+			strings.EqualFold(toks[end+1].text, "as") &&
+			toks[end+2].kind == kindPunct && toks[end+2].text == "(" {
+			return name, true
+		}
+		// ) x(c) / ) AS x(c) の形。
+		if closesGroup(toks, i-1) {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// identListEnd は toks[i] の開き括弧が識別子とカンマだけの並びを囲んでいる
+// なら、対応する閉じ括弧の位置を返す。空の括弧は false。
+func identListEnd(toks []token, i int) (int, bool) {
+	depth := toks[i].depth
+	idents := 0
+	for j := i + 1; j < len(toks); j++ {
+		t := toks[j]
+		switch {
+		case t.kind == kindPunct && t.text == ")" && t.depth == depth:
+			return j, idents > 0
+		case t.kind == kindQuoted:
+			idents++
+		case t.kind == kindIdent && !keywords[fold(t.text)]:
+			idents++
+		case t.kind == kindPunct && t.text == ",":
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// closesGroup は toks[j] の直前が閉じ括弧かを返す。AS を挟む形も見る。
+func closesGroup(toks []token, j int) bool {
+	k := j - 1
+	if k >= 0 && toks[k].kind == kindIdent && strings.EqualFold(toks[k].text, "as") {
+		k--
+	}
+	return k >= 0 && toks[k].kind == kindPunct && toks[k].text == ")"
 }
 
 // parseItem は項目1つから出力名と参照する列名を取り出す。
@@ -298,33 +409,37 @@ func collectRefs(toks []token, exempt map[string]string) ([]string, []Exemption)
 	// 最後に Exemption にする。
 	var cand []Exemption
 
-	// ancestors は括弧ごとに、その内側を覆っている許可関数の名前。
-	// 空文字列は許可関数の外を表す。
-	var ancestors []string
-	current := ""
+	// outer は括弧ごとの、1つ外側の文脈。閉じ括弧で戻すために積む。
+	var outer []frame
+	cur := frame{}
 
 	for i, t := range toks {
 		switch {
 		case t.kind == kindPunct && t.text == "(":
-			ancestors = append(ancestors, current)
-			if current == "" {
-				current = exemptCallName(toks, i, exempt)
+			outer = append(outer, cur)
+			next := frame{call: isCallOpen(toks, i)}
+			// 許可関数は祖先まで見る。内側の入れ子も覆われたままにする。
+			if cur.exempt != "" {
+				next.exempt = cur.exempt
+			} else {
+				next.exempt = exemptCallName(toks, i, exempt)
 			}
+			cur = next
 		case t.kind == kindPunct && t.text == ")":
-			if len(ancestors) > 0 {
-				current = ancestors[len(ancestors)-1]
-				ancestors = ancestors[:len(ancestors)-1]
+			if len(outer) > 0 {
+				cur = outer[len(outer)-1]
+				outer = outer[:len(outer)-1]
 			}
 		case t.kind == kindIdent || t.kind == kindQuoted:
-			name, ok := refName(toks, i)
+			name, ok := refName(toks, i, cur.call)
 			if !ok {
 				continue
 			}
-			if current == "" {
+			if cur.exempt == "" {
 				refs.add(name)
 				continue
 			}
-			cand = append(cand, Exemption{Function: current, Column: name})
+			cand = append(cand, Exemption{Function: cur.exempt, Column: name})
 		}
 	}
 
@@ -339,8 +454,31 @@ func collectRefs(toks []token, exempt map[string]string) ([]string, []Exemption)
 	return refs.list(), exempted
 }
 
+// frame は括弧1つ分の文脈。
+type frame struct {
+	// exempt は非空なら、この括弧を覆っている許可関数の名前。
+	exempt string
+	// call は関数呼び出しの引数リストかどうか。
+	//
+	// 引数リストの中の FROM は句ではなく引数の区切りになる
+	// （extract(year FROM ts) / trim(both ' ' FROM s) / substring(s FROM 1)）。
+	// 区別しないと、区切りの後ろにある列名を「サブクエリのテーブル名」として
+	// 捨ててしまい、伝播が黙って落ちる。
+	call bool
+}
+
+// isCallOpen は開き括弧が関数呼び出しの引数リストを開いたかを返す。
+//
+// 直前が識別子で、かつキーワードでないときだけ呼び出しとみなす。
+// x IN (SELECT ...) や OVER (PARTITION BY ...) を呼び出しに数えると、
+// 中の FROM をテーブル名の目印として使えなくなる。
+func isCallOpen(toks []token, i int) bool {
+	return i > 0 && toks[i-1].kind == kindIdent && !keywords[fold(toks[i-1].text)]
+}
+
 // refName は toks[i] が列参照ならその名前を返す。
-func refName(toks []token, i int) (string, bool) {
+// inCall は関数呼び出しの引数リストの中にいるかどうか。
+func refName(toks []token, i int, inCall bool) (string, bool) {
 	t := toks[i]
 	if i+1 < len(toks) && toks[i+1].kind == kindPunct {
 		switch toks[i+1].text {
@@ -351,7 +489,9 @@ func refName(toks []token, i int) (string, bool) {
 		}
 	}
 	// 項目の中のサブクエリに現れるテーブル名を列名として拾わない。
-	if i > 0 && toks[i-1].kind == kindIdent {
+	// 関数の引数リストの中の FROM は句ではなく区切りなので、その後ろは
+	// 列参照でありうる（extract(year FROM birth_date)）。
+	if !inCall && i > 0 && toks[i-1].kind == kindIdent {
 		switch fold(toks[i-1].text) {
 		case "from", "join":
 			return "", false
@@ -392,7 +532,8 @@ var keywords = map[string]bool{
 	"at": true, "between": true, "by": true, "case": true, "cast": true,
 	"collate": true, "cross": true, "desc": true, "distinct": true,
 	"else": true, "end": true, "escape": true, "except": true,
-	"exists": true, "false": true, "fetch": true, "for": true,
+	"exists": true, "false": true, "fetch": true, "filter": true,
+	"for":  true,
 	"from": true, "full": true, "group": true, "having": true,
 	"ilike": true, "in": true, "inner": true, "intersect": true,
 	"into": true, "is": true, "join": true, "lateral": true,

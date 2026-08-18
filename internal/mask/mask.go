@@ -469,7 +469,11 @@ func (e *Engine) resolveWithOrigin(column string, o sqlalias.Origin) (columnMask
 	cm := e.resolve(column)
 	via := ""
 	for _, src := range o.Sources {
-		merged := stronger(cm, e.resolve(src))
+		sm, ok := e.matchedMask(src)
+		if !ok {
+			continue
+		}
+		merged := stronger(cm, sm)
 		if merged != cm {
 			// 強くした（または partial を狭めた）由来だけを記録する。
 			via = src
@@ -484,10 +488,14 @@ func (e *Engine) resolveWithOrigin(column string, o sqlalias.Origin) (columnMask
 // 許可関数の内側にあった列に、適用済みの方法より強いマスクが掛かっていな
 // ければ、止めたものは無い。count(id) のような無害な集計まで並べると、
 // 本当に弱化が起きた行が埋もれる。
+//
+// 判定は resolve ではなく matchedMask で行う。default_action は出力列の側で
+// 既に効いており、ここに持ち込むと allowlist 運用では全ての許可関数が
+// 「弱化した」ことになる。
 func (e *Engine) stoppedPropagation(all []sqlalias.Exemption, applied columnMask) []sqlalias.Exemption {
 	var out []sqlalias.Exemption
 	for _, x := range all {
-		if strength(e.resolve(x.Column).method) > strength(applied.method) {
+		if m, ok := e.matchedMask(x.Column); ok && strength(m.method) > strength(applied.method) {
 			out = append(out, x)
 		}
 	}
@@ -495,8 +503,24 @@ func (e *Engine) stoppedPropagation(all []sqlalias.Exemption, applied columnMask
 }
 
 // resolve は列1つに適用する方法を決める。
+// マッチするルールが1つも無ければ default_action が決める。
 func (e *Engine) resolve(column string) columnMask {
-	best := columnMask{method: e.fallback}
+	if m, ok := e.matchedMask(column); ok {
+		return m
+	}
+	return columnMask{method: e.fallback}
+}
+
+// matchedMask は列名にマッチしたルールのうち最も強いものを返す。
+// マッチが1つも無ければ ok は false になる。
+//
+// default_action を混ぜないのは、伝播（resolveWithOrigin）が「マッチした
+// ルールだけ」を由来から拾うため。由来に既定を持ち込むと、allowlist 運用
+// （default_action: redact）では、ルールに挙がっていない由来がすべて redact を
+// 押し付けることになり、出力列に書いた method: none の穴が塞がる。
+// マッチしたルールが既定より優先される（ADR-0003 §7）という規則も崩れる。
+func (e *Engine) matchedMask(column string) (columnMask, bool) {
+	var best columnMask
 	matched := false
 	for _, r := range e.rules {
 		if !r.matches(column) {
@@ -508,5 +532,5 @@ func (e *Engine) resolve(column string) columnMask {
 		}
 		best = stronger(best, r.mask)
 	}
-	return best
+	return best, matched
 }

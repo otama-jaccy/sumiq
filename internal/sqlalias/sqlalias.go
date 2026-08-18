@@ -149,6 +149,11 @@ func Analyze(sql string, exemptFunctions []string) *Analysis {
 		return undetermined(ReasonNoSelect, "",
 			"SELECT を含まないクエリでは列の由来を辿れません")
 	}
+	if name, ok := columnAliasList(toks); ok {
+		return undetermined(ReasonUnknownOutput,
+			fmt.Sprintf("%s の列別名リストは、内側の SELECT の項目と対応付けられません", name),
+			"内側の SELECT で列に別名（AS）を付け、列別名リストを使わない形にしてください")
+	}
 
 	a := newAnalysis()
 	minDepth := lists[0].depth
@@ -165,6 +170,9 @@ func Analyze(sql string, exemptFunctions []string) *Analysis {
 		// 内側の識別子まで参照列として拾っているため、内側の出力名が
 		// 分からなくても由来は落ちない。
 		absorbed := !top && inSelectList(lists, l)
+		// 出力列が外側から名前で引かれない SELECT（WHERE / HAVING / ON の
+		// 中のサブクエリ）は、出力名が分からなくても結果列に届かない。
+		named := namedOutput[l.context]
 
 		for _, it := range l.items {
 			if it.name != "" {
@@ -176,7 +184,7 @@ func Analyze(sql string, exemptFunctions []string) *Analysis {
 			}
 			// トップレベルなら結果列と位置で対応させれば辿れる可能性がある
 			// （needsPositional）。使えるかは列数が出揃う Columns で決まる。
-			if top || absorbed {
+			if top || absorbed || !named {
 				continue
 			}
 			// 内側の SELECT で別名の無い式。結果列名も位置も辿れない。
@@ -254,7 +262,7 @@ func (a *Analysis) Columns(names []string) ([]Origin, *UndeterminedError) {
 	for i, n := range names {
 		out[i] = Origin{
 			Sources:    a.closure([]string{n}, n),
-			Exemptions: dedupeExemptions(a.exemptions[fold(n)]),
+			Exemptions: a.expandExemptions(a.exemptions[fold(n)]),
 		}
 	}
 	if a.undetermined != nil {
@@ -292,10 +300,26 @@ func (a *Analysis) bindByPosition(names []string, out []Origin) *UndeterminedErr
 	for _, l := range a.top {
 		for i, it := range l.items {
 			out[i].Sources = mergeNames(out[i].Sources, a.closure(it.refs, names[i]))
-			out[i].Exemptions = dedupeExemptions(append(out[i].Exemptions, it.exempted...))
+			out[i].Exemptions = a.expandExemptions(append(out[i].Exemptions, it.exempted...))
 		}
 	}
 	return nil
+}
+
+// expandExemptions は伝播を止めた列を、その列の由来まで広げる。
+//
+// 許可関数の引数がさらに別名だった場合（count(contact) の contact が
+// email 由来）、実際に止まったのは元の列に掛かっていたマスクである。
+// 広げないと、弱化が起きたことを通知に出せない。
+func (a *Analysis) expandExemptions(all []Exemption) []Exemption {
+	out := make([]Exemption, 0, len(all))
+	for _, e := range all {
+		out = append(out, e)
+		for _, src := range a.closure([]string{e.Column}, e.Column) {
+			out = append(out, Exemption{Function: e.Function, Column: src})
+		}
+	}
+	return dedupeExemptions(out)
 }
 
 // closure は seeds から辿れる列名をすべて返す。self と同じ名前は除く。

@@ -106,6 +106,59 @@ func TestPropagationStrongerWins(t *testing.T) {
 	}
 }
 
+// TestPropagationDoesNotCloseTheAllowlistHole は、allowlist 運用
+// （default_action: redact）で開けた method: none の穴が、由来のせいで
+// 塞がらないことを見る。
+//
+// 伝播は「由来にマッチしたルール」だけを見る。由来に default_action を
+// 持ち込むと、ルールに挙がっていない由来（型名やテーブル名のような
+// 過剰近似で拾った名前も含む）がすべて redact を押し付け、式から作った列に
+// 穴を開けられなくなる。マッチしたルールが既定より優先されるという
+// 規則（ADR-0003 §7）も崩れる。
+func TestPropagationDoesNotCloseTheAllowlistHole(t *testing.T) {
+	allowlist := config.Masking{
+		DefaultAction: config.ActionRedact,
+		Rules: []config.MaskRule{
+			rule(config.MaskRedact, "email"),
+			rule(config.MaskNone, "label"),
+		},
+	}
+	e := newEngine(t, allowlist)
+
+	t.Run("ルールの無い由来は穴を塞がない", func(t *testing.T) {
+		got, sum := applySQL(t, e, "SELECT cast(nickname AS text) AS label FROM u",
+			nil, result([]string{"label"}, []any{"taro"}))
+		if got.Rows[0][0] != "taro" {
+			t.Errorf("値 = %#v, want %q。method: none の穴が塞がっています", got.Rows[0][0], "taro")
+		}
+		if via := sum.Columns[0].Via; via != "" {
+			t.Errorf("Via = %q, want 空", via)
+		}
+	})
+
+	t.Run("ルールのある由来は穴より強い", func(t *testing.T) {
+		got, _ := applySQL(t, e, "SELECT email AS label FROM u",
+			nil, result([]string{"label"}, []any{"a@example.com"}))
+		if got.Rows[0][0] != redacted {
+			t.Errorf("値 = %#v, want %q。伝播が method: none に負けています", got.Rows[0][0], redacted)
+		}
+	})
+}
+
+// TestExemptedFollowsTheClosure は、許可関数の引数がさらに別名だったときも
+// 弱化を通知できることを見る。
+func TestExemptedFollowsTheClosure(t *testing.T) {
+	e := newEngine(t, masking(rule(config.MaskRedact, "email")))
+	_, sum := applySQL(t, e,
+		"WITH u AS (SELECT email AS contact FROM users) SELECT count(contact) AS n FROM u",
+		[]string{"count"}, result([]string{"n"}, []any{"3"}))
+
+	want := []sqlalias.Exemption{{Function: "count", Column: "email"}}
+	if got := sum.Columns[0].Exempted; !reflect.DeepEqual(got, want) {
+		t.Errorf("Exempted = %+v, want %+v。止まったのは email のマスク", got, want)
+	}
+}
+
 // TestPropagatedDropRemovesColumn は drop が伝播したとき列ごと消えることを見る。
 func TestPropagatedDropRemovesColumn(t *testing.T) {
 	e := newEngine(t, masking(rule(config.MaskDrop, "email")))
