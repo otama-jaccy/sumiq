@@ -9,6 +9,7 @@ import (
 	"github.com/otama-jaccy/sumiq/internal/output"
 	"github.com/otama-jaccy/sumiq/internal/redash"
 	"github.com/otama-jaccy/sumiq/internal/rowguard"
+	"github.com/otama-jaccy/sumiq/internal/sqlalias"
 )
 
 // QueryParams は Query 1回分の呼び出しパラメータ。コマンドライン引数の詰め替え先。
@@ -55,6 +56,23 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		return err
 	}
 
+	// 列の由来（別名）の解析もネットワークに依存しない。alias_guard: strict
+	// （既定）で解析できなければ、Redash に一切リクエストを飛ばさずここで止める。
+	analysis := sqlalias.Analyze(p.SQL, resolved.Config.Masking.ExemptFunctionNames())
+	if u := analysis.Undetermined(); u != nil {
+		if ds.AliasGuard.Strict() {
+			return fmt.Errorf("SQL から列の由来を解析できませんでした: %w。"+
+				"データソース %q に alias_guard: %s を共有ファイル（%s）で指定すると、"+
+				"解析できないクエリでも実行できます（その場合、別名で改名された列に"+
+				"マスクは伝播しません）", u, p.DataSource, config.AliasGuardOff, config.SharedFileName)
+		}
+		if _, err := fmt.Fprintf(deps.Err, "Warning: SQL から列の由来を解析できませんでした（%v）。"+
+			"alias_guard: %s のため実行を続けます。別名で改名された列にマスクは伝播しません。\n",
+			u, config.AliasGuardOff); err != nil {
+			return fmt.Errorf("警告を書き出せませんでした: %w", err)
+		}
+	}
+
 	// マスクルールの検証はネットワークに依存しない。Redash へのクエリ実行
 	// （時間のかかるジョブ投入・ポーリングを伴う）より前に済ませ、設定の
 	// 誤りを実行前に検出する。
@@ -96,7 +114,7 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		return err
 	}
 
-	masked, sum, err := engine.Apply(res)
+	masked, sum, err := engine.Apply(res, analysis)
 	if err != nil {
 		return err
 	}

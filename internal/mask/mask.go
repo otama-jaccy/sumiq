@@ -19,6 +19,17 @@
 // 機能しない（ADR-0003 §7）。強い方に倒すのは「複数のルールがマッチしたとき」
 // だけであり、既定との比較には持ち込まない。
 //
+// # 別名（AS）で改名された列
+//
+// 列名はクエリの書き方で決まるため、SELECT email AS contact と書くだけで
+// email に掛けたルールがマッチしなくなる。そこで internal/sqlalias が SQL から
+// 取り出した「その列の由来になりうる列名」にもルールを照合し、最も強いものを
+// 出力列に適用する（伝播）。判断は docs/adr/0016-sql-alias-mask-propagation.md。
+//
+// 伝播は「複数マッチは強い方が勝つ」規則の拡張として入れてある。そのため
+// 別名の側に method: none を書いても伝播は打ち消せない。伝播を止める手段は
+// masking.propagation_exempt_functions（許可関数）だけに一本化してある。
+//
 // # 値を見ない
 //
 // マスクは列に対して決まり、値そのものは見ない。NULL の値も他の値と同じく
@@ -35,6 +46,7 @@ import (
 
 	"github.com/otama-jaccy/sumiq/internal/config"
 	"github.com/otama-jaccy/sumiq/internal/redash"
+	"github.com/otama-jaccy/sumiq/internal/sqlalias"
 )
 
 // saltLen は hash に使う salt の長さ。
@@ -52,6 +64,9 @@ type Engine struct {
 	// fallback はどのルールにもマッチしなかった列に適用する方法。
 	fallback config.MaskMethod
 	salt     []byte
+	// strictAlias は結果列と SQL の列を対応付けられなかったときに
+	// エラーにするか。データソースの alias_guard から決まる。
+	strictAlias bool
 }
 
 // compiledRule は照合器まで組み立てたルール1件。
@@ -96,7 +111,11 @@ func New(cfg config.Config, dataSource string) (*Engine, error) {
 		return nil, err
 	}
 
-	e := &Engine{fallback: fallback, salt: make([]byte, saltLen)}
+	e := &Engine{
+		fallback:    fallback,
+		salt:        make([]byte, saltLen),
+		strictAlias: ds.AliasGuard.Strict(),
+	}
 	if _, err := rand.Read(e.salt); err != nil {
 		// salt を作れないまま固定値に落とすと、ハッシュが実行をまたいで
 		// 復元可能になる。マスクを弱めるくらいなら実行しない。
@@ -263,6 +282,15 @@ type Summary struct {
 type ColumnMask struct {
 	Name   string
 	Method config.MaskMethod
+	// Via は伝播元の列名。直接マッチで決まったなら空。
+	//
+	// 過剰マスクの原因を追えるようにするために持つ。internal/sqlalias は
+	// スコープを潰す（別スコープの同名の別名を同じものとして扱う）ため、
+	// 身に覚えのない列が伏せられたときの手掛かりがこれしかない。
+	Via string
+	// Exempted は許可関数が伝播を止めた元の列名。弱化が起きたことを
+	// 毎回見えるようにするために持つ。
+	Exempted []sqlalias.Exemption
 }
 
 // Masked は実際にマスクした列（method: none 以外）を入力順に返す。
@@ -290,12 +318,16 @@ func (s Summary) MaskedKept() []ColumnMask {
 	return out
 }
 
-// Dropped は drop で出力から消えた列名を入力順に返す。
-func (s Summary) Dropped() []string {
-	var out []string
+// Dropped は drop で出力から消えた列を入力順に返す。
+//
+// 列名だけでなく ColumnMask を返すのは、伝播で消えた列の由来（Via）を
+// 通知に出せるようにするため。出力に残らない列は、なぜ消えたのかを
+// 結果から確かめられない。
+func (s Summary) Dropped() []ColumnMask {
+	var out []ColumnMask
 	for _, c := range s.Columns {
 		if c.Method == config.MaskDrop {
-			out = append(out, c.Name)
+			out = append(out, c)
 		}
 	}
 	return out
@@ -305,10 +337,32 @@ func (s Summary) Dropped() []string {
 //
 // 入力は書き換えない。drop された列は Columns からも各行からも消える
 // （ADR-0004 §3）。マスクした値は常に文字列になり、null だけが nil になる。
-func (e *Engine) Apply(res *redash.Result) (*redash.Result, Summary, error) {
+//
+// a は実行した SQL の解析結果（internal/sqlalias）。省略できる形にしていない
+// のは、渡し忘れを実行時ではなくコンパイル時に見つけるため。渡し忘れると
+// 別名で改名された列のマスクが黙って外れる。
+func (e *Engine) Apply(res *redash.Result, a *sqlalias.Analysis) (*redash.Result, Summary, error) {
 	if res == nil {
 		// 結果が無いことを空の結果として返すと、0 件のクエリと区別が付かない。
 		return nil, Summary{}, errors.New("マスク対象の結果がありません")
+	}
+	if a == nil {
+		// nil を「由来が無い」として扱うと、伝播が丸ごと消えたまま実行される。
+		return nil, Summary{}, errors.New("列の由来の解析結果がありません")
+	}
+
+	names := make([]string, len(res.Columns))
+	for i, c := range res.Columns {
+		names[i] = c.Name
+	}
+	// 対応付けができなかったこと（判定不能）を「由来なし」に倒さない。
+	// strict なら実行を止め、off なら解析できた範囲の伝播だけを効かせる。
+	origins, undetermined := a.Columns(names)
+	if undetermined != nil && e.strictAlias {
+		return nil, Summary{}, fmt.Errorf("結果列と SQL の列を対応付けられませんでした: %w。"+
+			"このデータソースの alias_guard: %s を共有ファイル（%s）に書けば、"+
+			"対応付けできないクエリでも実行できます",
+			undetermined, config.AliasGuardOff, config.SharedFileName)
 	}
 
 	sum := Summary{Columns: make([]ColumnMask, 0, len(res.Columns))}
@@ -318,8 +372,13 @@ func (e *Engine) Apply(res *redash.Result) (*redash.Result, Summary, error) {
 	srcIndex := make([]int, 0, len(res.Columns))
 
 	for i, c := range res.Columns {
-		cm := e.resolve(c.Name)
-		sum.Columns = append(sum.Columns, ColumnMask{Name: c.Name, Method: cm.method})
+		cm, via, exempted := e.resolveWithOrigin(c.Name, origins[i])
+		sum.Columns = append(sum.Columns, ColumnMask{
+			Name:     c.Name,
+			Method:   cm.method,
+			Via:      via,
+			Exempted: exempted,
+		})
 		if cm.method == config.MaskDrop {
 			continue
 		}
@@ -344,6 +403,44 @@ func (e *Engine) Apply(res *redash.Result) (*redash.Result, Summary, error) {
 	}
 
 	return &redash.Result{Columns: cols, Rows: rows}, sum, nil
+}
+
+// resolveWithOrigin は列1つに適用する方法を、由来も含めて決める。
+//
+// 出力列名そのものへの照合と、由来になりうる列名への照合のうち、最も強い
+// ものが勝つ。既存の「複数マッチは強い方が勝つ」規則をそのまま使うため、
+// partial 同士は tighten で「どちらも残す部分」だけが残る。
+//
+// 由来の側にも default_action が効く。allowlist 運用では、由来が
+// method: none で通っている列でも出力列の側で穴を開けていなければ伏せる。
+// これは伝播の結果ではなく allowlist 運用そのもの（ADR-0003 §7）。
+func (e *Engine) resolveWithOrigin(column string, o sqlalias.Origin) (columnMask, string, []sqlalias.Exemption) {
+	cm := e.resolve(column)
+	via := ""
+	for _, src := range o.Sources {
+		merged := stronger(cm, e.resolve(src))
+		if merged != cm {
+			// 強くした（または partial を狭めた）由来だけを記録する。
+			via = src
+		}
+		cm = merged
+	}
+	return cm, via, e.stoppedPropagation(o.Exemptions, cm)
+}
+
+// stoppedPropagation は許可関数が実際に弱化を起こした分だけを返す。
+//
+// 許可関数の内側にあった列に、適用済みの方法より強いマスクが掛かっていな
+// ければ、止めたものは無い。count(id) のような無害な集計まで並べると、
+// 本当に弱化が起きた行が埋もれる。
+func (e *Engine) stoppedPropagation(all []sqlalias.Exemption, applied columnMask) []sqlalias.Exemption {
+	var out []sqlalias.Exemption
+	for _, x := range all {
+		if strength(e.resolve(x.Column).method) > strength(applied.method) {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 // resolve は列1つに適用する方法を決める。

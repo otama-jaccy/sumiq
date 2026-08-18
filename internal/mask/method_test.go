@@ -83,10 +83,7 @@ func TestStrongestWins(t *testing.T) {
 					{ruleFor(b, "col"), ruleFor(a, "col")},
 				} {
 					e := newEngine(t, masking(rules...))
-					_, sum, err := e.Apply(result([]string{"col"}, []any{"plain"}))
-					if err != nil {
-						t.Fatalf("Apply: %v", err)
-					}
+					_, sum := apply(t, e, result([]string{"col"}, []any{"plain"}))
 					if got := methodOf(t, sum, "col"); got != want {
 						t.Errorf("%q と %q がマッチ → %q, want %q",
 							rules[0].Method, rules[1].Method, got, want)
@@ -160,10 +157,7 @@ func TestPartialTighten(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newEngine(t, masking(tt.rules...))
-			got, _, err := e.Apply(result([]string{"col"}, []any{"user@example.com"}))
-			if err != nil {
-				t.Fatalf("Apply: %v", err)
-			}
+			got, _ := apply(t, e, result([]string{"col"}, []any{"user@example.com"}))
 			if got.Rows[0][0] != tt.want {
 				t.Errorf("値 = %#v, want %#v", got.Rows[0][0], tt.want)
 			}
@@ -250,10 +244,7 @@ func TestHashIsConsistentWithinRun(t *testing.T) {
 		[]any{json.Number("9007199254740992")})
 
 	e := newEngine(t, masking(rule(config.MaskHash, "user_id")))
-	got, _, err := e.Apply(in)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	got, _ := apply(t, e, in)
 
 	first, second, other := got.Rows[0][0], got.Rows[1][0], got.Rows[2][0]
 	if first != second {
@@ -268,10 +259,7 @@ func TestHashIsConsistentWithinRun(t *testing.T) {
 		t.Errorf("ハッシュ = %#v, want %d 文字", first, hashLength)
 	}
 
-	other2, _, err := newEngine(t, masking(rule(config.MaskHash, "user_id"))).Apply(in)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	other2, _ := apply(t, newEngine(t, masking(rule(config.MaskHash, "user_id"))), in)
 	if other2.Rows[0][0] == first {
 		t.Error("別の実行で同じハッシュになりました。salt が実行ごとに変わっていません")
 	}
@@ -311,11 +299,8 @@ func TestMaskedValuesAreStrings(t *testing.T) {
 		rule(config.MaskNone, "e"),
 	))
 
-	got, _, err := e.Apply(result([]string{"a", "b", "c", "d", "e"},
+	got, _ := apply(t, e, result([]string{"a", "b", "c", "d", "e"},
 		[]any{json.Number("1"), json.Number("2"), json.Number("345"), json.Number("4"), json.Number("5")}))
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
 
 	for i, name := range []string{"a", "b", "c"} {
 		if _, ok := got.Rows[0][i].(string); !ok {
