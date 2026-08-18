@@ -187,6 +187,98 @@ Column-name patterns are glob by default (`*` matches any run of characters,
 containing `[` are rejected as an error. To match part of a column name, use
 the `regex:` prefix instead (also case-insensitive).
 
+### Renaming a column with `AS` doesn't remove its mask
+
+Rules match against **column names**, and column names are decided by the
+query. On its own, `SELECT email AS contact FROM users` returns a column named
+`contact`, which `patterns: ["email"]` doesn't match.
+
+So sumiq reads the SQL, collects the column names each result column **may
+derive from**, and applies the strongest mask among them (propagation). This
+covers `AS`, the `AS`-less form, CTEs, subqueries, and each branch of a
+`UNION`:
+
+```sql
+WITH u AS (SELECT id, email AS contact FROM users)
+SELECT contact AS c2 FROM u
+```
+
+`c2` derives from `contact`, which derives from `email`, so the rule on
+`email` applies to `c2`. When a mask comes from propagation, the notification
+on stderr says where it came from:
+
+```
+Masked: c2 (redact, contact 由来)
+```
+
+Two things follow from how this is built:
+
+- **The analysis is deliberately over-approximate.** Exact column-level
+  lineage can't be resolved without a schema catalog (`*` can't be expanded),
+  so unrelated names — table names, or a type name inside a `CAST` — can end
+  up counted as sources. The only consequence is masking more than necessary.
+  Scopes are flattened too: same-named aliases in different subqueries are
+  treated as one.
+- **It doesn't stop deliberate circumvention.** Anyone who can build values
+  dynamically can defeat it. As with "The data source allowlist is not a
+  security boundary" below, this protects against accidents, not against the
+  person writing the query.
+
+#### `alias_guard` — queries whose columns can't be traced
+
+When the SQL can't be read (unbalanced quotes / comments / parens, multiple
+statements), contains no `SELECT` at all (non-SQL query runners, `SHOW`,
+`CALL`), or contains an expression whose output name can't be determined and
+can't be matched positionally either, sumiq **refuses to run it and never
+sends a request to Redash.** Loosen that per data source:
+
+```yaml
+data_sources:
+  - name: mongo
+    id: 9
+    alias_guard: off      # default is strict
+```
+
+`off` only stops the refusal — propagation still applies to whatever *was*
+analyzed — and prints a warning on every run. **For non-SQL data sources this
+is a breaking change:** they need `alias_guard: off` added. Like every other
+mask-weakening setting, `off` can only be written in the shared file
+(`sumiq.yaml`).
+
+#### `propagation_exempt_functions` — stopping propagation
+
+Without this, `SELECT count(email) AS n` makes `n` inherit `email`'s mask.
+List the functions whose output can't carry the original value:
+
+```yaml
+masking:
+  propagation_exempt_functions:
+    - name: count
+      note: "Only a row count comes out, never the value itself."
+```
+
+- **The list is empty by default — not even `count` is built in.** A weakening
+  that isn't written in the config can't be traced back from the config when
+  something does leak.
+- **Watch out for `min` / `max` / `sum` / `avg`.** For a group with few rows
+  they return the original value itself (with one row, `sum` *is* the value).
+  sumiq can't decide which functions are safe; that's a team judgment.
+- Names are matched **exactly** and case-insensitively. No globs and no
+  `regex:` (`count*` would let through a user-defined `count_raw_emails`),
+  and schema-qualified calls such as `pg_catalog.count` don't match.
+- **It only stops propagation.** Matching against the output column name and
+  `default_action` still apply: under `default_action: redact`, `n` is still
+  `****` unless you also open a `method: none` hole for it. And only the
+  identifiers appearing *inside* the exempt call are stopped —
+  `count(email) OVER (PARTITION BY email)` still propagates through the
+  second `email`.
+- Like `method: none`, it can only be written in the shared file. Whenever it
+  actually stops a mask, the notification says so:
+
+```
+Exempted: n (none, count が email の伝播を止めた)
+```
+
 ### `hash` uses a random salt per run — values don't match across runs
 
 `hash` replaces a value with the first 12 characters of
