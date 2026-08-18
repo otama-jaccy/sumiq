@@ -53,9 +53,33 @@ type baseConfigOpts struct {
 	endpoint  string
 	maxRows   int
 	autoLimit bool
+	// aliasGuard は analytics の alias_guard。空なら書かない（既定の strict）。
+	aliasGuard string
+	// dsDefaultAction は analytics の default_action。空なら書かない。
+	dsDefaultAction string
+	// exemptFunctions は masking.propagation_exempt_functions に挙げる関数名。
+	exemptFunctions []string
+	// extraRules は masking.rules に足す YAML 断片。インデントを含めて書く。
+	extraRules string
 }
 
 func baseConfig(o baseConfigOpts) string {
+	dataSource := "  - name: analytics\n    id: 3\n"
+	if o.aliasGuard != "" {
+		dataSource += "    alias_guard: " + o.aliasGuard + "\n"
+	}
+	if o.dsDefaultAction != "" {
+		dataSource += "    default_action: " + o.dsDefaultAction + "\n"
+	}
+
+	exempt := ""
+	for _, f := range o.exemptFunctions {
+		if exempt == "" {
+			exempt = "  propagation_exempt_functions:\n"
+		}
+		exempt += "    - name: " + f + "\n      note: \"テスト用\"\n"
+	}
+
 	return fmt.Sprintf(`
 version: 1
 redash:
@@ -63,20 +87,18 @@ redash:
   timeout: 5s
   poll_interval: 10ms
 data_sources:
-  - name: analytics
-    id: 3
-query:
+%squery:
   auto_limit: %t
   max_rows: %d
   on_exceed: error
 masking:
   default_action: none
-  rules:
+%s  rules:
     - patterns: ["email"]
       method: redact
-output:
+%soutput:
   format: table
-`, o.endpoint, o.autoLimit, o.maxRows)
+`, o.endpoint, dataSource, o.autoLimit, o.maxRows, exempt, o.extraRules)
 }
 
 // newTestDeps は dir を設定探索の起点にした Deps と、その Out / Err の
@@ -221,40 +243,12 @@ func TestQuery_InvalidMaskRuleFailsBeforeNetworkCall(t *testing.T) {
 	}
 }
 
-// aliasConfig は analytics に alias_guard を指定した共有設定を返す。
-// guard が空なら指定しない（既定の strict）。
-func aliasConfig(endpoint, guard string) string {
-	ds := "  - name: analytics\n    id: 3\n"
-	if guard != "" {
-		ds += "    alias_guard: " + guard + "\n"
-	}
-	return fmt.Sprintf(`
-version: 1
-redash:
-  endpoint: %s
-  timeout: 5s
-  poll_interval: 10ms
-data_sources:
-%squery:
-  auto_limit: true
-  max_rows: 1000
-  on_exceed: error
-masking:
-  default_action: none
-  rules:
-    - patterns: ["email"]
-      method: redact
-output:
-  format: table
-`, endpoint, ds)
-}
-
 // TestQuery_別名にマスクが伝播する は、別名を付けてもマスクが外れないことと、
 // 通知に由来が出ることを見る。
 func TestQuery_別名にマスクが伝播する(t *testing.T) {
 	srv := fakeRedash(t, col("contact", "string"), `{"contact":"a@example.com"}`)
 	dir := t.TempDir()
-	writeConfig(t, dir, "sumiq.yaml", aliasConfig(srv.URL, ""))
+	writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{endpoint: srv.URL, maxRows: 1000, autoLimit: true}))
 	deps, out, errW := newTestDeps(dir)
 
 	err := Query(context.Background(), deps, QueryParams{
@@ -288,7 +282,7 @@ func TestQuery_AliasGuardStrictはネットワークに出る前に落ちる(t *
 	t.Cleanup(srv.Close)
 
 	dir := t.TempDir()
-	writeConfig(t, dir, "sumiq.yaml", aliasConfig(srv.URL, ""))
+	writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{endpoint: srv.URL, maxRows: 1000, autoLimit: true}))
 	deps, _, _ := newTestDeps(dir)
 
 	err := Query(context.Background(), deps, QueryParams{
@@ -312,7 +306,9 @@ func TestQuery_AliasGuardStrictはネットワークに出る前に落ちる(t *
 func TestQuery_AliasGuardOffは警告を出して続ける(t *testing.T) {
 	srv := fakeRedash(t, col("email", "string"), `{"email":"a@example.com"}`)
 	dir := t.TempDir()
-	writeConfig(t, dir, "sumiq.yaml", aliasConfig(srv.URL, "off"))
+	writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{
+		endpoint: srv.URL, maxRows: 1000, autoLimit: true, aliasGuard: "off",
+	}))
 	deps, out, errW := newTestDeps(dir)
 
 	err := Query(context.Background(), deps, QueryParams{
@@ -324,43 +320,13 @@ func TestQuery_AliasGuardOffは警告を出して続ける(t *testing.T) {
 		t.Fatalf("Query() 失敗: %v", err)
 	}
 
-	if got := errW.String(); !strings.Contains(got, "Warning: SQL から列の由来を解析できませんでした") {
+	if got := errW.String(); !strings.Contains(got, "Warning: SQL から結果列の由来を辿れませんでした") {
 		t.Errorf("警告が出ていません: %s", got)
 	}
 	// 名前で照合する通常のマスクは、解析できなくても効き続ける。
 	if got := out.String(); !strings.Contains(got, `"email":"****"`) {
 		t.Errorf("email がマスクされていません: %s", got)
 	}
-}
-
-// allowlistConfig は allowlist 運用（analytics だけ redact）の共有設定を返す。
-// extraRules は masking.rules に足す YAML 断片。
-func allowlistConfig(endpoint, extraRules string) string {
-	return fmt.Sprintf(`
-version: 1
-redash:
-  endpoint: %s
-  timeout: 5s
-  poll_interval: 10ms
-data_sources:
-  - name: analytics
-    id: 3
-    default_action: redact
-query:
-  auto_limit: true
-  max_rows: 1000
-  on_exceed: error
-masking:
-  default_action: none
-  propagation_exempt_functions:
-    - name: count
-      note: "件数しか出ないため"
-  rules:
-    - patterns: ["email"]
-      method: redact
-%soutput:
-  format: table
-`, endpoint, extraRules)
 }
 
 // TestQuery_許可リストだけでは allowlist に穴は開かない は、伝播を止めても
@@ -394,7 +360,12 @@ func TestQuery_許可リストだけではallowlistに穴は開かない(t *test
 		t.Run(tt.name, func(t *testing.T) {
 			srv := fakeRedash(t, col("n", "integer"), `{"n":3}`)
 			dir := t.TempDir()
-			writeConfig(t, dir, "sumiq.yaml", allowlistConfig(srv.URL, tt.extraRules))
+			writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{
+				endpoint: srv.URL, maxRows: 1000, autoLimit: true,
+				dsDefaultAction: "redact",
+				exemptFunctions: []string{"count"},
+				extraRules:      tt.extraRules,
+			}))
 			deps, out, errW := newTestDeps(dir)
 
 			err := Query(context.Background(), deps, QueryParams{

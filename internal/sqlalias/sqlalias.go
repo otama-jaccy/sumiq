@@ -119,9 +119,6 @@ type Analysis struct {
 	// top は最も浅い SELECT。結果列に位置で対応させるのはこれだけ。
 	// UNION の各枝で複数になる。
 	top []selectList
-	// needsPositional は top に「出力名が分からず、かつ由来を持つ項目」が
-	// あるかどうか。あるときだけ位置対応が要る。
-	needsPositional bool
 }
 
 // Analyze は sql を解析する。
@@ -153,39 +150,33 @@ func Analyze(sql string, exemptFunctions []string) *Analysis {
 			"SELECT を含まないクエリでは列の由来を辿れません")
 	}
 
-	a := &Analysis{
-		alias:      map[string][]string{},
-		exemptions: map[string][]Exemption{},
-	}
+	a := newAnalysis()
 	minDepth := lists[0].depth
 	for _, l := range lists[1:] {
 		minDepth = min(minDepth, l.depth)
 	}
 
 	for _, l := range lists {
-		if l.depth == minDepth {
+		top := l.depth == minDepth
+		if top {
 			a.top = append(a.top, l)
 		}
+		// select list の項目に含まれるスカラーサブクエリなら、外側の項目が
+		// 内側の識別子まで参照列として拾っているため、内側の出力名が
+		// 分からなくても由来は落ちない。
+		absorbed := !top && inSelectList(lists, l)
+
 		for _, it := range l.items {
 			if it.name != "" {
-				key := fold(it.name)
-				a.alias[key] = append(a.alias[key], it.refs...)
-				a.exemptions[key] = append(a.exemptions[key], it.exempted...)
+				a.addAlias(it)
 				continue
 			}
 			if it.star || !it.hasOrigin() {
 				continue // 伝播するものが無い項目。名前が分からなくても構わない。
 			}
-			if l.depth == minDepth {
-				// 結果列と位置で対応させれば辿れる可能性がある。
-				// 使えるかは列数が出揃う Columns で決まる。
-				a.needsPositional = true
-				continue
-			}
-			if inSelectList(lists, l) {
-				// select list の項目に含まれるスカラーサブクエリ。外側の
-				// 項目が内側の識別子まで参照列として拾っているため、
-				// 内側の出力名が分からなくても由来は落ちない。
+			// トップレベルなら結果列と位置で対応させれば辿れる可能性がある
+			// （needsPositional）。使えるかは列数が出揃う Columns で決まる。
+			if top || absorbed {
 				continue
 			}
 			// 内側の SELECT で別名の無い式。結果列名も位置も辿れない。
@@ -202,15 +193,47 @@ func Analyze(sql string, exemptFunctions []string) *Analysis {
 	return a
 }
 
+// addAlias は出力名の分かった項目を別名の表に足す。
+//
+// 自分自身への参照（SELECT email のような単純な列参照）は入れない。
+// closure が self を除くため辿っても何も増えず、列の数だけ表が膨らむ。
+func (a *Analysis) addAlias(it item) {
+	key := fold(it.name)
+	for _, ref := range it.refs {
+		if !strings.EqualFold(ref, it.name) {
+			a.alias[key] = append(a.alias[key], ref)
+		}
+	}
+	a.exemptions[key] = append(a.exemptions[key], it.exempted...)
+}
+
+// needsPositional はトップレベルの select list に「出力名が分からず、かつ
+// 由来を持つ項目」があるかを返す。あるときだけ結果列との位置対応が要る。
+func (a *Analysis) needsPositional() bool {
+	for _, l := range a.top {
+		for _, it := range l.items {
+			if it.name == "" && !it.star && it.hasOrigin() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // aliasAdvice は出力名が分からないときの案内。
 const aliasAdvice = "その式に別名（AS）を付けて出力列名を明示してください"
 
-func undetermined(r Reason, detail, advice string) *Analysis {
+func newAnalysis() *Analysis {
 	return &Analysis{
-		undetermined: &UndeterminedError{Reason: r, Detail: detail, Advice: advice},
-		alias:        map[string][]string{},
-		exemptions:   map[string][]Exemption{},
+		alias:      map[string][]string{},
+		exemptions: map[string][]Exemption{},
 	}
+}
+
+func undetermined(r Reason, detail, advice string) *Analysis {
+	a := newAnalysis()
+	a.undetermined = &UndeterminedError{Reason: r, Detail: detail, Advice: advice}
+	return a
 }
 
 // Undetermined は解析できなかった理由を返す。解析できたなら nil。
@@ -237,13 +260,10 @@ func (a *Analysis) Columns(names []string) ([]Origin, *UndeterminedError) {
 	if a.undetermined != nil {
 		return out, a.undetermined
 	}
-	if !a.needsPositional {
+	if !a.needsPositional() {
 		return out, nil
 	}
-	if u := a.bindByPosition(names, out); u != nil {
-		return out, u
-	}
-	return out, nil
+	return out, a.bindByPosition(names, out)
 }
 
 // bindByPosition は結果列と select list の項目を位置で対応付ける。
@@ -283,29 +303,26 @@ func (a *Analysis) bindByPosition(names []string, out []Origin) *UndeterminedErr
 // 再帰 CTE や自己参照する別名（SELECT email AS email）で回らないよう、
 // 一度辿った名前は visited で止める。
 func (a *Analysis) closure(seeds []string, self string) []string {
-	visited := make(map[string]bool, len(seeds))
-	queue := make([]string, 0, len(seeds))
-	push := func(name string) {
-		if k := fold(name); !visited[k] {
-			visited[k] = true
-			queue = append(queue, name)
-		}
-	}
+	// visited は辿る順のキューも兼ねる。add は初出のときだけ足すため、
+	// 一度辿った名前を二度辿らない。
+	var visited nameSet
 	for _, s := range seeds {
-		push(s)
+		visited.add(s)
+	}
+	for i := 0; i < len(visited.names); i++ {
+		for _, src := range a.alias[fold(visited.names[i])] {
+			visited.add(src)
+		}
 	}
 
-	var found nameSet
-	for i := 0; i < len(queue); i++ {
-		name := queue[i]
-		if !equalFold(name, self) {
-			found.add(name)
-		}
-		for _, src := range a.alias[fold(name)] {
-			push(src)
+	// 由来が無いことは nil で表す。空スライスと使い分けはしない。
+	var out []string
+	for _, name := range visited.names {
+		if !strings.EqualFold(name, self) {
+			out = append(out, name)
 		}
 	}
-	return sortNames(found.list())
+	return sortNames(out)
 }
 
 // inSelectList は l が別の SELECT の select list の中にあるかを返す。
@@ -371,12 +388,15 @@ func dedupeExemptions(all []Exemption) []Exemption {
 	if len(all) == 0 {
 		return nil
 	}
-	var seen nameSet
+	seen := make(map[string]bool, len(all))
 	out := make([]Exemption, 0, len(all))
 	for _, e := range all {
-		if seen.add(e.Function + "\x00" + e.Column) {
-			out = append(out, e)
+		key := fold(e.Function) + "\x00" + fold(e.Column)
+		if seen[key] {
+			continue
 		}
+		seen[key] = true
+		out = append(out, e)
 	}
 	slices.SortFunc(out, func(x, y Exemption) int {
 		if c := strings.Compare(fold(x.Column), fold(y.Column)); c != 0 {
@@ -418,5 +438,3 @@ func (s *nameSet) list() []string { return s.names }
 // 返りうる。internal/mask のパターン照合も大文字小文字を無視するため、
 // ここも無視する側に揃える。
 func fold(s string) string { return strings.ToLower(s) }
-
-func equalFold(a, b string) bool { return strings.EqualFold(a, b) }

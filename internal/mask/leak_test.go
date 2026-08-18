@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/otama-jaccy/sumiq/internal/config"
+	"github.com/otama-jaccy/sumiq/internal/redash"
 )
 
 // このファイルは「マッチするルールがあるのにマスクされない」ケースが
@@ -166,9 +167,24 @@ func assertMasked(t *testing.T, column string, method config.MaskMethod, r confi
 	}
 
 	got, sum := apply(t, e, result([]string{column}, []any{secretValue}))
+	assertNoResidue(t, got, sum, column, method, "")
+}
 
-	if m := methodOf(t, sum, column); m != method {
-		t.Fatalf("サマリの method = %q, want %q", m, method)
+// assertNoResidue は column が method の通りにマスクされ、元の値が出力に
+// 残っていないことを見る。wantVia が空でなければ伝播元も確かめる。
+//
+// マスクが外れていないことの判定はここ1か所に集める。直接マッチと伝播で
+// 別々に書くと、片方にだけ検査を足したときに、もう片方が緩いまま残る。
+func assertNoResidue(t *testing.T, got *redash.Result, sum Summary,
+	column string, method config.MaskMethod, wantVia string) {
+	t.Helper()
+
+	c := columnMaskOf(t, sum, column)
+	if c.Method != method {
+		t.Fatalf("サマリの method = %q, want %q", c.Method, method)
+	}
+	if wantVia != "" && c.Via != wantVia {
+		t.Errorf("列 %q の Via = %q, want %q", column, c.Via, wantVia)
 	}
 
 	if method == config.MaskDrop {
@@ -255,44 +271,7 @@ func TestExemptFunctionDoesNotOpenAHole(t *testing.T) {
 func assertPropagated(t *testing.T, sql, column string, method config.MaskMethod, exempt []string) {
 	t.Helper()
 
-	e, err := New(testConfig(masking(ruleFor(method, "email"))), testDataSource)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
+	e := newEngine(t, masking(ruleFor(method, "email")))
 	got, sum := applySQL(t, e, sql, exempt, result([]string{column}, []any{secretValue}))
-
-	if m := methodOf(t, sum, column); m != method {
-		t.Fatalf("%s: 列 %q の method = %q, want %q。別名にマスクが伝播していません", sql, column, m, method)
-	}
-	if via := viaOf(t, sum, column); via != "email" {
-		t.Errorf("%s: 列 %q の Via = %q, want email", sql, column, via)
-	}
-
-	if method == config.MaskDrop {
-		if len(got.Columns) != 0 {
-			t.Fatalf("%s: drop が伝播したのに列が残っています: %v", sql, columnNames(got))
-		}
-		return
-	}
-
-	v := got.Rows[0][0]
-	if v == secretValue {
-		t.Fatalf("%s: 値がマスクされていません: %#v", sql, v)
-	}
-	if s, ok := v.(string); ok && strings.Contains(s, "@example.com") && method != config.MaskPartial {
-		t.Fatalf("%s: %s なのに値の一部が残っています: %q", sql, method, s)
-	}
-}
-
-// viaOf はサマリから列の伝播元を取り出す。
-func viaOf(t *testing.T, s Summary, column string) string {
-	t.Helper()
-	for _, c := range s.Columns {
-		if c.Name == column {
-			return c.Via
-		}
-	}
-	t.Fatalf("サマリに列 %q がありません: %+v", column, s.Columns)
-	return ""
+	assertNoResidue(t, got, sum, column, method, "email")
 }

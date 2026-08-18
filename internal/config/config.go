@@ -108,9 +108,6 @@ type ExemptFunction struct {
 //
 // internal/sqlalias は config の型を知らない葉パッケージなので、名前だけを渡す。
 func (m Masking) ExemptFunctionNames() []string {
-	if len(m.PropagationExemptFunctions) == 0 {
-		return nil
-	}
 	names := make([]string, len(m.PropagationExemptFunctions))
 	for i, f := range m.PropagationExemptFunctions {
 		names[i] = f.Name

@@ -2,6 +2,7 @@ package sqlalias
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -258,7 +259,7 @@ func TestAnalyzeRecursiveCTEStops(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// 止まらなければテストが返らない。由来に email が入ることも見る。
 			got := sourcesOf(t, analyze(t, tt.sql), []string{"e", "a"})
-			if !contains(got["e"], "email") && !contains(got["a"], "email") {
+			if !slices.Contains(got["e"], "email") && !slices.Contains(got["a"], "email") {
 				t.Errorf("email からの伝播を拾えていません: %v", got)
 			}
 		})
@@ -502,13 +503,4 @@ func TestExemptFunctionNameIsExactMatch(t *testing.T) {
 			}
 		})
 	}
-}
-
-func contains(names []string, want string) bool {
-	for _, n := range names {
-		if n == want {
-			return true
-		}
-	}
-	return false
 }

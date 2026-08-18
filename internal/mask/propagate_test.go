@@ -238,6 +238,11 @@ func TestApplyUndeterminedByGuard(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
+		// 伝播が効いていないことは出力を見ても分からない。呼び出し側が
+		// 毎回警告を出せるよう、辿れなかった理由をサマリに残す。
+		if sum.AliasUndetermined == nil {
+			t.Error("サマリに判定不能の理由が残っていません")
+		}
 		// c は別名が付いているので、対応付けができなくても由来を辿れる。
 		if got.Rows[0][0] != redacted {
 			t.Errorf("値 = %#v, want %q", got.Rows[0][0], redacted)
@@ -261,4 +266,41 @@ func TestApplyRowsStayAlignedAfterPropagatedDrop(t *testing.T) {
 	if !reflect.DeepEqual(got.Rows, want) {
 		t.Errorf("行 = %#v, want %#v", got.Rows, want)
 	}
+}
+
+// TestPrecheckAliasByGuard は、ネットワークに出る前の検査でも判定不能の
+// 扱いが alias_guard で決まることを見る。
+//
+// 判定できるかどうかの決定と文言は internal/mask に閉じる。呼び出し側でも
+// 判定すると、同じ状況でどちらの検査が先に効いたかで文言が変わる。
+func TestPrecheckAliasByGuard(t *testing.T) {
+	// SELECT が1つも無いため、結果列を見るまでもなく辿れない。
+	analysis := sqlalias.Analyze("SHOW TABLES", nil)
+
+	t.Run("strict はエラーにする", func(t *testing.T) {
+		e := guardedEngine(t, config.AliasGuardStrict, masking())
+		err := e.PrecheckAlias(analysis)
+		if err == nil {
+			t.Fatal("エラーになりませんでした")
+		}
+		for _, want := range []string{"SELECT", "alias_guard", string(config.AliasGuardOff)} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("エラー文言 %q に %q が含まれていません", err.Error(), want)
+			}
+		}
+	})
+
+	t.Run("off は通す", func(t *testing.T) {
+		e := guardedEngine(t, config.AliasGuardOff, masking())
+		if err := e.PrecheckAlias(analysis); err != nil {
+			t.Errorf("PrecheckAlias: %v", err)
+		}
+	})
+
+	t.Run("解析結果を渡し忘れたら strict でなくてもエラーにする", func(t *testing.T) {
+		e := guardedEngine(t, config.AliasGuardOff, masking())
+		if err := e.PrecheckAlias(nil); err == nil {
+			t.Error("エラーになりませんでした")
+		}
+	})
 }

@@ -83,8 +83,13 @@ func noAlias(t *testing.T, res *redash.Result) *sqlalias.Analysis {
 	for _, c := range res.Columns {
 		quoted = append(quoted, `"`+strings.ReplaceAll(c.Name, `"`, `""`)+`"`)
 	}
-	sql := "SELECT " + strings.Join(quoted, ", ") + " FROM t"
-	a := sqlalias.Analyze(sql, nil)
+	return mustAnalyze(t, "SELECT "+strings.Join(quoted, ", ")+" FROM t", nil)
+}
+
+// mustAnalyze は sql を解析する。判定不能なら失敗させる。
+func mustAnalyze(t *testing.T, sql string, exempt []string) *sqlalias.Analysis {
+	t.Helper()
+	a := sqlalias.Analyze(sql, exempt)
 	if u := a.Undetermined(); u != nil {
 		t.Fatalf("%s: 判定不能になりました: %v", sql, u)
 	}
@@ -104,11 +109,7 @@ func apply(t *testing.T, e *Engine, res *redash.Result) (*redash.Result, Summary
 // applySQL は sql を実行した結果として Apply を通す。伝播を見るテストで使う。
 func applySQL(t *testing.T, e *Engine, sql string, exempt []string, res *redash.Result) (*redash.Result, Summary) {
 	t.Helper()
-	a := sqlalias.Analyze(sql, exempt)
-	if u := a.Undetermined(); u != nil {
-		t.Fatalf("%s: 判定不能になりました: %v", sql, u)
-	}
-	got, sum, err := e.Apply(res, a)
+	got, sum, err := e.Apply(res, mustAnalyze(t, sql, exempt))
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -124,16 +125,22 @@ func columnNames(res *redash.Result) []string {
 	return names
 }
 
-// methodOf はサマリから列に適用された method を取り出す。
-func methodOf(t *testing.T, s Summary, column string) config.MaskMethod {
+// columnMaskOf はサマリから列1つの記録を取り出す。
+func columnMaskOf(t *testing.T, s Summary, column string) ColumnMask {
 	t.Helper()
 	for _, c := range s.Columns {
 		if c.Name == column {
-			return c.Method
+			return c
 		}
 	}
 	t.Fatalf("サマリに列 %q がありません: %+v", column, s.Columns)
-	return ""
+	return ColumnMask{}
+}
+
+// methodOf はサマリから列に適用された method を取り出す。
+func methodOf(t *testing.T, s Summary, column string) config.MaskMethod {
+	t.Helper()
+	return columnMaskOf(t, s, column).Method
 }
 
 func TestApplyMasksEachMethod(t *testing.T) {

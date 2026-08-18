@@ -270,6 +270,14 @@ func (r compiledRule) matches(column string) bool {
 
 // Summary は列ごとに適用したマスクの一覧。stderr への通知（#5）に使う。
 type Summary struct {
+	// AliasUndetermined は結果列と SQL の列を対応付けられなかった理由。
+	// 対応付けできたなら nil。
+	//
+	// 入るのは alias_guard: off のときだけ（strict では Apply がエラーにする）。
+	// 呼び出し側が毎回警告を出せるようにするために持つ。伝播が効いていない
+	// ことは出力を見ても分からない。
+	AliasUndetermined *sqlalias.UndeterminedError
+
 	// Columns は入力の列すべてを入力順に持つ。マスクしなかった列も、
 	// drop で出力から消えた列も含む。
 	//
@@ -318,6 +326,20 @@ func (s Summary) MaskedKept() []ColumnMask {
 	return out
 }
 
+// Exempted は許可関数が伝播を止めた列を入力順に返す。
+//
+// マスクが掛かっていない列（method: none）も含める。止まったことが見えなければ
+// 弱化に気付けない。
+func (s Summary) Exempted() []ColumnMask {
+	var out []ColumnMask
+	for _, c := range s.Columns {
+		if len(c.Exempted) > 0 {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Dropped は drop で出力から消えた列を入力順に返す。
 //
 // 列名だけでなく ColumnMask を返すのは、伝播で消えた列の由来（Via）を
@@ -358,14 +380,14 @@ func (e *Engine) Apply(res *redash.Result, a *sqlalias.Analysis) (*redash.Result
 	// 対応付けができなかったこと（判定不能）を「由来なし」に倒さない。
 	// strict なら実行を止め、off なら解析できた範囲の伝播だけを効かせる。
 	origins, undetermined := a.Columns(names)
-	if undetermined != nil && e.strictAlias {
-		return nil, Summary{}, fmt.Errorf("結果列と SQL の列を対応付けられませんでした: %w。"+
-			"このデータソースの alias_guard: %s を共有ファイル（%s）に書けば、"+
-			"対応付けできないクエリでも実行できます",
-			undetermined, config.AliasGuardOff, config.SharedFileName)
+	if err := e.aliasGuardError(undetermined); err != nil {
+		return nil, Summary{}, err
 	}
 
-	sum := Summary{Columns: make([]ColumnMask, 0, len(res.Columns))}
+	sum := Summary{
+		AliasUndetermined: undetermined,
+		Columns:           make([]ColumnMask, 0, len(res.Columns)),
+	}
 	cols := make([]redash.Column, 0, len(res.Columns))
 	masks := make([]columnMask, 0, len(res.Columns))
 	// srcIndex は出力の列 → 入力の列。drop で番号がずれるため保持する。
@@ -403,6 +425,35 @@ func (e *Engine) Apply(res *redash.Result, a *sqlalias.Analysis) (*redash.Result
 	}
 
 	return &redash.Result{Columns: cols, Rows: rows}, sum, nil
+}
+
+// PrecheckAlias は SQL の解析結果を、Redash に問い合わせる前に検査する。
+//
+// 判定不能を alias_guard: strict で止めるのは、ネットワークに出る前でなければ
+// 意味が無い（mask.New を client.Execute より前に置いてあるのと同じ理由）。
+//
+// 結果列と突き合わせて初めて分かる理由（位置対応が使えない）はここでは
+// 分からない。それは Apply が同じ規則で判定する。
+func (e *Engine) PrecheckAlias(a *sqlalias.Analysis) error {
+	if a == nil {
+		return errors.New("列の由来の解析結果がありません")
+	}
+	return e.aliasGuardError(a.Undetermined())
+}
+
+// aliasGuardError は判定不能を、alias_guard: strict のときだけエラーにする。
+//
+// 判定不能をどう扱うかの決定と文言をここ1か所に集約する。呼び出し側でも
+// 判定すると、利用者から見て同じ状況なのに、どちらの検査が先に効いたかで
+// 文言が変わる。片方だけ直したときに挙動がずれる経路にもなる。
+func (e *Engine) aliasGuardError(u *sqlalias.UndeterminedError) error {
+	if u == nil || !e.strictAlias {
+		return nil
+	}
+	return fmt.Errorf("SQL から結果列の由来を辿れませんでした: %w。"+
+		"このデータソースに alias_guard: %s を共有ファイル（%s）で指定すると、"+
+		"辿れないクエリでも実行できます（その場合、別名で改名された列に"+
+		"マスクは伝播しません）", u, config.AliasGuardOff, config.SharedFileName)
 }
 
 // resolveWithOrigin は列1つに適用する方法を、由来も含めて決める。

@@ -1,5 +1,7 @@
 package sqlalias
 
+import "strings"
+
 // selectList は SELECT 1つ分の select list。
 type selectList struct {
 	// depth は SELECT キーワードを囲む括弧の深さ。最も浅い SELECT が
@@ -52,7 +54,7 @@ var selectListEnd = map[string]bool{
 func selects(toks []token, exempt map[string]string) []selectList {
 	var out []selectList
 	for i, t := range toks {
-		if t.kind != kindIdent || !equalFold(t.text, "select") {
+		if t.kind != kindIdent || !strings.EqualFold(t.text, "select") {
 			continue
 		}
 		if i > 0 && toks[i-1].kind == kindPunct && toks[i-1].text == "." {
@@ -117,7 +119,7 @@ func stripSelectModifiers(toks []token, depth int) []token {
 		case "distinct", "unique", "all":
 			toks = toks[1:]
 			// PostgreSQL の DISTINCT ON (a, b)。
-			if len(toks) > 1 && toks[0].kind == kindIdent && equalFold(toks[0].text, "on") &&
+			if len(toks) > 1 && toks[0].kind == kindIdent && strings.EqualFold(toks[0].text, "on") &&
 				toks[1].kind == kindPunct && toks[1].text == "(" {
 				toks = skipGroup(toks[1:], depth)
 			}
@@ -130,11 +132,11 @@ func stripSelectModifiers(toks []token, depth int) []token {
 			case len(toks) > 0 && toks[0].kind == kindPunct && toks[0].text == "(":
 				toks = skipGroup(toks, depth)
 			}
-			if len(toks) > 0 && toks[0].kind == kindIdent && equalFold(toks[0].text, "percent") {
+			if len(toks) > 0 && toks[0].kind == kindIdent && strings.EqualFold(toks[0].text, "percent") {
 				toks = toks[1:]
 			}
-			if len(toks) > 1 && toks[0].kind == kindIdent && equalFold(toks[0].text, "with") &&
-				toks[1].kind == kindIdent && equalFold(toks[1].text, "ties") {
+			if len(toks) > 1 && toks[0].kind == kindIdent && strings.EqualFold(toks[0].text, "with") &&
+				toks[1].kind == kindIdent && strings.EqualFold(toks[1].text, "ties") {
 				toks = toks[2:]
 			}
 		default:
@@ -205,7 +207,7 @@ func splitAlias(toks []token, depth int) (string, []token) {
 	}
 	// AS <ident>。
 	if n >= 3 && toks[n-2].kind == kindIdent && toks[n-2].depth == depth &&
-		equalFold(toks[n-2].text, "as") {
+		strings.EqualFold(toks[n-2].text, "as") {
 		return last.text, toks[:n-2]
 	}
 	// AS 省略形。直前が式を終えられる token のときだけ別名と読む。
@@ -326,17 +328,13 @@ func collectRefs(toks []token, exempt map[string]string) ([]string, []Exemption)
 		}
 	}
 
+	// 許可関数の外にも現れていれば伝播している。止まっていないので通知しない。
+	// 同じ組の重複は、通知に出す直前の dedupeExemptions が落とす。
 	var exempted []Exemption
-	var seen nameSet
 	for _, c := range cand {
-		// 許可関数の外にも現れていれば伝播する。止まっていないので通知しない。
-		if refs.has(c.Column) {
-			continue
+		if !refs.has(c.Column) {
+			exempted = append(exempted, c)
 		}
-		if !seen.add(c.Function + "\x00" + c.Column) {
-			continue
-		}
-		exempted = append(exempted, c)
 	}
 	return refs.list(), exempted
 }

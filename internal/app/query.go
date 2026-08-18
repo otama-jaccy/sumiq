@@ -56,28 +56,21 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		return err
 	}
 
-	// 列の由来（別名）の解析もネットワークに依存しない。alias_guard: strict
-	// （既定）で解析できなければ、Redash に一切リクエストを飛ばさずここで止める。
+	// 列の由来（別名）の解析はネットワークに依存しない。
 	analysis := sqlalias.Analyze(p.SQL, resolved.Config.Masking.ExemptFunctionNames())
-	if u := analysis.Undetermined(); u != nil {
-		if ds.AliasGuard.Strict() {
-			return fmt.Errorf("SQL から列の由来を解析できませんでした: %w。"+
-				"データソース %q に alias_guard: %s を共有ファイル（%s）で指定すると、"+
-				"解析できないクエリでも実行できます（その場合、別名で改名された列に"+
-				"マスクは伝播しません）", u, p.DataSource, config.AliasGuardOff, config.SharedFileName)
-		}
-		if _, err := fmt.Fprintf(deps.Err, "Warning: SQL から列の由来を解析できませんでした（%v）。"+
-			"alias_guard: %s のため実行を続けます。別名で改名された列にマスクは伝播しません。\n",
-			u, config.AliasGuardOff); err != nil {
-			return fmt.Errorf("警告を書き出せませんでした: %w", err)
-		}
-	}
 
-	// マスクルールの検証はネットワークに依存しない。Redash へのクエリ実行
+	// マスクルールの検証もネットワークに依存しない。Redash へのクエリ実行
 	// （時間のかかるジョブ投入・ポーリングを伴う）より前に済ませ、設定の
 	// 誤りを実行前に検出する。
 	engine, err := mask.New(resolved.Config, p.DataSource)
 	if err != nil {
+		return err
+	}
+
+	// alias_guard: strict（既定）で由来を辿れなければ、Redash に一切
+	// リクエストを飛ばさずここで止める。判定不能をどう扱うかは
+	// internal/mask が決める（app では判定しない）。
+	if err := engine.PrecheckAlias(analysis); err != nil {
 		return err
 	}
 
@@ -117,6 +110,16 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 	masked, sum, err := engine.Apply(res, analysis)
 	if err != nil {
 		return err
+	}
+
+	// ここに来るのは alias_guard: off のときだけ（strict は上で止まる）。
+	// 伝播が効いていないことは出力を見ても分からないため、毎回警告を出す。
+	if u := sum.AliasUndetermined; u != nil {
+		if _, err := fmt.Fprintf(deps.Err, "Warning: SQL から結果列の由来を辿れませんでした（%v）。"+
+			"alias_guard: %s のため実行を続けました。別名で改名された列にマスクは伝播していません。\n",
+			u, config.AliasGuardOff); err != nil {
+			return fmt.Errorf("警告を書き出せませんでした: %w", err)
+		}
 	}
 
 	return output.Render(deps.Out, deps.Err, p.Format, masked, sum, deps.TTY)
