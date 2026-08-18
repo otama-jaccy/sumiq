@@ -17,6 +17,7 @@ internal/app/         ドメインロジック。CLI フレームワークを im
 internal/config/      設定の読み込み
 internal/redash/      Redash API クライアント
 internal/mask/        マスクルールの適用
+internal/sqlalias/    SQL から結果列の由来になりうる列名を取り出す
 ```
 
 依存は `cmd → internal/cli → internal/app` の一方向。逆流させない。
@@ -26,7 +27,11 @@ internal/mask/        マスクルールの適用
 持ち込むと API クライアントを設定ファイル抜きにテストできなくなる。
 必要な値は呼び出し側が詰め替えて渡す。
 
-`internal/mask` はその2つを import する（ルールの型は `config`、結果の型は `redash`）。
+`internal/sqlalias` は**何も import しない葉パッケージ**として保つ。`config` の型を
+知らせると、SQL の読み方が設定のレイヤ構造に依存し始める。許可関数は名前の並びだけを渡す。
+
+`internal/mask` は `config` と `redash`、それに `internal/sqlalias` を import する
+（ルールの型は `config`、結果の型は `redash`、列の由来は `sqlalias`）。
 向きは一方向で、`config` と `redash` は `mask` を知らない。**ここで型を詰め替えない**のは、
 変換そのものがルールや列を落としうる経路になるため。落ちたことは出力を見ても分からない。
 
@@ -231,6 +236,61 @@ path.Match(`payload\user`, `payload\user`)   // => false（\u が u に化ける
 同じ理由で、**照合器を組み立てられないパターンはエラーにする。**「何にもマッチしない
 パターン」として読み飛ばすと、そのルールが消えたまま実行される。
 
+### 列名の由来（別名）を辿る検査は、辿れなかったことを「由来なし」に倒さない
+
+マスクは結果の**列名**にしか照合されない。列名はクエリの書き方で決まるため、
+`SELECT email AS contact` と書くだけでルールが外れる。`internal/sqlalias` が
+SQL から由来を取り出し、`internal/mask` がその由来にもルールを照合して
+最も強いものを適用する（[ADR-0016](../../docs/adr/0016-sql-alias-mask-propagation.md)）。
+
+この経路には、壊しやすく壊れても出力に何も現れない箇所がいくつかある。
+
+**解析結果を省略できる形にしない。** `Engine.Apply` は
+`*sqlalias.Analysis` を必須の引数で受け取る。別メソッド・オプション引数・
+`nil` を空の解析として扱う実装のいずれも、渡し忘れが実行時にしか分からず、
+別名で改名された列のマスクが黙って外れる。渡し忘れはコンパイルエラーにする。
+
+```go
+// 悪い: 呼び忘れても通る。別名の列のマスクが外れたことは出力に現れない
+func (e *Engine) Apply(res *redash.Result) (*redash.Result, Summary, error)
+func (e *Engine) ApplyWithAlias(res *redash.Result, a *sqlalias.Analysis) (...)
+
+// 良い: 渡さなければコンパイルできない
+func (e *Engine) Apply(res *redash.Result, a *sqlalias.Analysis) (*redash.Result, Summary, error)
+```
+
+**`internal/sqlalias` の型を詰め替えない。** `map[string][]string` に移し替えると
+その変換が由来を落としうる経路になる。`internal/mask` は
+`sqlalias.Origin` / `sqlalias.Exemption` をそのまま持ち回り、
+`internal/output` までその型で運ぶ（`internal/config` と `internal/redash` の
+型を詰め替えないのと同じ理由）。
+
+**判定不能をどう扱うかの決定は `internal/mask` に1つだけ置く。** `alias_guard` を
+`internal/app` でも読んで判定すると、利用者から見て同じ状況なのに、どちらの
+検査が先に効いたかで文言が変わり、片方だけ直したときに挙動がずれる。
+`internal/app` は `Engine.PrecheckAlias`（ネットワークに出る前）と
+`Summary.AliasUndetermined`（実行後の警告）を使うだけにする。
+
+**キーワード表に「列名になりうる語」を載せない。** `internal/sqlalias` は式に
+現れた識別子を由来として拾い、キーワード表に載せた語を除く。載せ忘れた語は
+列名として拾われ**過剰にマスクする側**（安全側）に倒れるが、`date` / `text` の
+ように列名と綴りが同じ語を載せると**伝播が落ちる**。型名は載せない。
+`CAST(email AS varchar)` の `varchar` を列名として拾う過剰さの方が安全。
+
+**キーワードを目印にするなら、それが区切りにも使われないかを確かめる。** `FROM` は
+句の始まりでもあり、`extract(year FROM ts)` / `trim(both ' ' FROM s)` /
+`substring(s FROM 1)` では引数の区切りでもある。「`FROM` の直後は列名ではない」と
+決めると、区切りの後ろにある**本物の列名を落とす**。過剰に拾う側の間違いは
+過剰マスクで済むが、この向きの間違いはマスクが外れる。括弧を開いたのが関数呼び出しか
+どうかで区別する（`internal/sqlalias.isCallOpen`）。
+
+**方言で読み方が変わる書き方は、片方に倒さずエラーにする。** 文字列リテラルの
+中のバックスラッシュ（MySQL / BigQuery は打ち消し、PostgreSQL の
+`standard_conforming_strings` は打ち消さない）のように、終端位置が方言で
+変わる並びは、読めたことにすると以降の `AS` やカンマの位置がずれた別名マップが
+できる。ずれた結果は「マスクが1つ外れた」という形でしか現れない。
+判定不能として返し、`alias_guard` の判断に委ねる。
+
 ### 値の一部を残す処理は「残す条件」として書く
 
 マスクで値の一部を残すとき、条件を満たさない入力は**全て伏せる側に倒す。**
@@ -415,6 +475,8 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
   （上の「`json.Decoder` でストリーミング読みするなら」の背景）
 - [ADR-0014](../../docs/adr/0014-non-masked-output-formatters.md): マスク不要なコマンドは
   `Render` を経由しない独立した formatter を持つ（上の「単発 GET の `classifyContextErr`」の背景）
+- [ADR-0016](../../docs/adr/0016-sql-alias-mask-propagation.md): 別名（AS）で改名された列に
+  マスクを伝播する（上の「列名の由来（別名）を辿る検査」の背景）
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 
