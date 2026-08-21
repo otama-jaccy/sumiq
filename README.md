@@ -186,6 +186,12 @@ Masking is a safety mechanism, and the structure specifically prevents
 - A rule can be scoped to specific data sources with `data_sources: [name,
   ...]`; omitting it applies the rule to every data source.
 
+The list above is not exhaustive — see
+[What unreviewed layers may not write](docs/configuration.md#what-unreviewed-layers-may-not-write)
+for the full set, which also covers methods weaker than `redact` in an
+allowlist scope, reusing a reviewed data source's `id` under a new name, and
+`alias_guard: off`.
+
 Column-name patterns are glob by default (`*` matches any run of characters,
 `?` matches a single character, matching is case-insensitive). Patterns
 containing `[` are rejected as an error. To match part of a column name, use
