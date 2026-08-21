@@ -9,6 +9,7 @@ import (
 	"github.com/otama-jaccy/sumiq/internal/config"
 	"github.com/otama-jaccy/sumiq/internal/mask"
 	"github.com/otama-jaccy/sumiq/internal/redash"
+	"github.com/otama-jaccy/sumiq/internal/sqlalias"
 )
 
 // result はテスト用に列名と行から結果セットを組み立てる。
@@ -59,12 +60,44 @@ func TestWriteSummary(t *testing.T) {
 				{Name: "secret", Method: config.MaskDrop},
 			}},
 			rows: 342,
-			want: "Masked: email (partial), memo (redact)\nDropped: secret\nRows: 342\n",
+			want: "Masked: email (partial), memo (redact)\nDropped: secret\nExempted: --\nRows: 342\n",
 		},
 		"nothing masked": {
 			sum:  mask.Summary{Columns: []mask.ColumnMask{{Name: "id", Method: config.MaskNone}}},
 			rows: 0,
-			want: "Masked: --\nDropped: --\nRows: 0\n",
+			want: "Masked: --\nDropped: --\nExempted: --\nRows: 0\n",
+		},
+		// 別名から伝播したマスクは由来を添える。過剰マスクの原因を追う
+		// 手掛かりは、スコープを潰す解析では通知にしか残らない。
+		"propagated from an alias": {
+			sum: mask.Summary{Columns: []mask.ColumnMask{
+				{Name: "contact", Method: config.MaskRedact, Via: "email"},
+				{Name: "gone", Method: config.MaskDrop, Via: "first_name"},
+			}},
+			rows: 3,
+			want: "Masked: contact (redact, email 由来)\nDropped: gone (first_name 由来)\nExempted: --\nRows: 3\n",
+		},
+		// 許可関数で伝播が止まったことは、マスクされていない列でも出す。
+		// 弱化が起きた回と起きなかった回が区別できなければ通知の意味が無い。
+		"propagation stopped by an exempt function": {
+			sum: mask.Summary{Columns: []mask.ColumnMask{
+				{Name: "n", Method: config.MaskNone, Exempted: []sqlalias.Exemption{
+					{Function: "count", Column: "email"},
+				}},
+			}},
+			rows: 1,
+			want: "Masked: --\nDropped: --\nExempted: n (none, count が email の伝播を止めた)\nRows: 1\n",
+		},
+		"multiple exemptions on one column": {
+			sum: mask.Summary{Columns: []mask.ColumnMask{
+				{Name: "n", Method: config.MaskNone, Exempted: []sqlalias.Exemption{
+					{Function: "count", Column: "email"},
+					{Function: "count", Column: "phone"},
+				}},
+			}},
+			rows: 1,
+			want: "Masked: --\nDropped: --\n" +
+				"Exempted: n (none, count が email の伝播を止めた、count が phone の伝播を止めた)\nRows: 1\n",
 		},
 	}
 
@@ -239,7 +272,7 @@ func TestMaskRepresentationPerFormat(t *testing.T) {
 
 	raw := result([]string{"id", "email", "memo", "secret"},
 		[]any{json.Number("1"), "a@example.com", "note", "topsecret"})
-	masked, sum, err := engine.Apply(raw)
+	masked, sum, err := engine.Apply(raw, sqlalias.Analyze("SELECT id, email, memo, secret FROM users", nil))
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -288,7 +321,7 @@ func TestMaskRepresentationPerFormat(t *testing.T) {
 		if err := Render(&out, &errW, JSON, masked, sum, false); err != nil {
 			t.Fatalf("Render: %v", err)
 		}
-		want := "Masked: email (redact), memo (null)\nDropped: secret\nRows: 1\n"
+		want := "Masked: email (redact), memo (null)\nDropped: secret\nExempted: --\nRows: 1\n"
 		if got := errW.String(); got != want {
 			t.Errorf("summary = %q, want %q", got, want)
 		}

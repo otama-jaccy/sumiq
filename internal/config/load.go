@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -40,6 +42,38 @@ func Load(r io.Reader) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// validateExemptFunctionName は伝播を止める関数名として受け付けられるかを見る。
+//
+// 照合は完全一致・大文字小文字無視だけで行う（internal/sqlalias）。そのため
+// グロブや regex:、括弧付きの呼び出し、スキーマ修飾はどれも「何にもマッチ
+// しない指定」になる。黙って通すと、書いた抜け道が効いていないのか、
+// 効いた上で伝播が止まっているのかを設定から区別できなくなる。
+func validateExemptFunctionName(name string) error {
+	if name == "" {
+		return errors.New("name が指定されていません")
+	}
+	if strings.HasPrefix(name, "regex:") || strings.ContainsAny(name, "*?") {
+		return fmt.Errorf("name: %q: 関数名は完全一致でのみ指定できます。"+
+			"グロブ（* ?）も regex: も使えません。関数名を1つずつ挙げてください", name)
+	}
+	if strings.ContainsAny(name, "()") || strings.ContainsFunc(name, unicode.IsSpace) {
+		return fmt.Errorf("name: %q: 関数名に括弧や空白は書けません。関数名だけを書いてください", name)
+	}
+	if strings.Contains(name, ".") {
+		return fmt.Errorf("name: %q: スキーマ修飾付きの関数名は書けません。"+
+			"修飾付きの呼び出し（pg_catalog.count 等）は伝播を止めません", name)
+	}
+	for i, c := range name {
+		switch {
+		case c == '_' || unicode.IsLetter(c):
+		case i > 0 && unicode.IsDigit(c):
+		default:
+			return fmt.Errorf("name: %q: 関数名として扱えない文字 %q が含まれています", name, c)
+		}
+	}
+	return nil
 }
 
 // LoadFile は path の設定ファイルを読み込む。
@@ -83,6 +117,12 @@ func (c *Config) validate() error {
 		}
 		if ds.ID <= 0 {
 			return fmt.Errorf("data_sources[%d] (%s): id は 1 以上で指定してください", i, ds.Name)
+		}
+	}
+
+	for i, f := range c.Masking.PropagationExemptFunctions {
+		if err := validateExemptFunctionName(f.Name); err != nil {
+			return fmt.Errorf("masking.propagation_exempt_functions[%d]: %w", i, err)
 		}
 	}
 
