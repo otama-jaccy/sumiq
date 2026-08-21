@@ -129,6 +129,11 @@ masking:
       note: "Required for aggregation and not personally identifying. Added to the allowlist."
 
 output:
-  # table / json / csv. Can be overridden per invocation with the CLI's
-  # --format flag (CLI flags take the highest precedence).
+  # table / json / csv.
+  #
+  # Known limitation: this key is currently not consumed. `sumiq query` and
+  # `sumiq data-sources list` both take --format, which carries its own default
+  # of `table`, so the flag always decides the output format. The value here is
+  # still validated (an invalid one fails the load), it just doesn't reach the
+  # renderer yet. See docs/configuration.md#output.
   format: table

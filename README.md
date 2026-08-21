@@ -89,6 +89,10 @@ Rows: 342
 
 ## Configuration
 
+The sections below cover the parts that are easy to get wrong. For the
+complete schema — every key, its type, its default, and the rules that govern
+it — see **[Configuration file reference](docs/configuration.md)**.
+
 Config is resolved by layering multiple files together (later layers win;
 scalars are overridden, not merged):
 
@@ -181,6 +185,12 @@ Masking is a safety mechanism, and the structure specifically prevents
   from local config would itself be a way to weaken the policy.
 - A rule can be scoped to specific data sources with `data_sources: [name,
   ...]`; omitting it applies the rule to every data source.
+
+The list above is not exhaustive — see
+[What unreviewed layers may not write](docs/configuration.md#what-unreviewed-layers-may-not-write)
+for the full set, which also covers methods weaker than `redact` in an
+allowlist scope, reusing a reviewed data source's `id` under a new name, and
+`alias_guard: off`.
 
 Column-name patterns are glob by default (`*` matches any run of characters,
 `?` matches a single character, matching is case-insensitive). Patterns
@@ -350,6 +360,13 @@ specified" error.
 This is a limitation of the CSV format itself, and `sumiq` doesn't work
 around it. If you need to tell a `NULL` value apart from an empty string,
 use `json` output instead.
+
+## Documentation
+
+- [Configuration file reference](docs/configuration.md) — the full config file
+  schema
+- [`docs/adr/`](docs/adr) — architecture decision records, i.e. why things are
+  the way they are
 
 ## License
 
