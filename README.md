@@ -89,6 +89,10 @@ Rows: 342
 
 ## Configuration
 
+The sections below cover the parts that are easy to get wrong. For the
+complete schema — every key, its type, its default, and the rules that govern
+it — see **[Configuration file reference](docs/configuration.md)**.
+
 Config is resolved by layering multiple files together (later layers win;
 scalars are overridden, not merged):
 
@@ -350,6 +354,13 @@ specified" error.
 This is a limitation of the CSV format itself, and `sumiq` doesn't work
 around it. If you need to tell a `NULL` value apart from an empty string,
 use `json` output instead.
+
+## Documentation
+
+- [Configuration file reference](docs/configuration.md) — the full config file
+  schema
+- [`docs/adr/`](docs/adr) — architecture decision records, i.e. why things are
+  the way they are
 
 ## License
 
