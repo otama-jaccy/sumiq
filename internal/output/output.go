@@ -155,3 +155,25 @@ func cellAt(row redash.Row, i int) any {
 	}
 	return nil
 }
+
+// WriteSaved は保存クエリの URL をマスクサマリの続きとして errW に書く。
+//
+//	Saved: https://redash.example.com/queries/123 (draft, 既存を再利用)
+//
+// stdout に混ぜないのは、stdout をデータだけに保つため（ADR-0004）。
+func WriteSaved(errW io.Writer, s *redash.SavedQuery) error {
+	if s == nil {
+		return errors.New("output: 保存クエリがありません")
+	}
+	state := "draft"
+	if !s.IsDraft {
+		state = "公開済み"
+	}
+	if s.Reused {
+		state += ", 既存を再利用"
+	}
+	if _, err := fmt.Fprintf(errW, "Saved: %s (%s)\n", s.URL, state); err != nil {
+		return fmt.Errorf("output: 保存クエリの URL を書き出せませんでした: %w", err)
+	}
+	return nil
+}
