@@ -69,6 +69,24 @@ func TestQueryCmd_NoShortFlagForFormatOrConfig(t *testing.T) {
 	}
 }
 
+func TestQueryCmd_SaveFlag(t *testing.T) {
+	parser, c := newParser(t)
+	if _, err := parser.Parse([]string{"query", "-d", "analytics", "SELECT 1"}); err != nil {
+		t.Fatalf("Parse() 失敗: %v", err)
+	}
+	if c.Query.Save {
+		t.Error("Save の既定値が false ではありません")
+	}
+
+	parser, c = newParser(t)
+	if _, err := parser.Parse([]string{"query", "-d", "analytics", "--save", "SELECT 1"}); err != nil {
+		t.Fatalf("Parse() 失敗: %v", err)
+	}
+	if !c.Query.Save {
+		t.Error("--save が Save に詰め替わっていません")
+	}
+}
+
 func TestQueryCmd_Run_DelegatesToApp(t *testing.T) {
 	// Run() が詰め替えのみで internal/app に処理を委ねていることを、
 	// 設定が無い状態でのエラーが app.Query 由来であることから確認する。
