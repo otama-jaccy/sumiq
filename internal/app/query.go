@@ -96,10 +96,11 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		return err
 	}
 
+	autoLimit := rowguard.EffectiveAutoLimit(resolved.Config.Query, ds)
 	res, err := client.Execute(ctx, redash.Query{
 		SQL:          p.SQL,
 		DataSourceID: ds.ID,
-		AutoLimit:    rowguard.EffectiveAutoLimit(resolved.Config.Query, ds),
+		AutoLimit:    autoLimit,
 		// max_rows を fetch の取得段階にも渡す。rowguard.Check の判定は
 		// 取得済みの結果に対して行われるため、それだけでは auto_limit: false
 		// で巨大な結果を引いたときに判定へ辿り着く前の OOM を防げない
@@ -144,6 +145,7 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		SQL:          p.SQL,
 		DataSourceID: ds.ID,
 		Tag:          savedQueryTag,
+		AutoLimit:    autoLimit,
 	})
 	if err != nil {
 		return fmt.Errorf("結果は出力しましたが、Redash に保存クエリを作れませんでした: %w", err)

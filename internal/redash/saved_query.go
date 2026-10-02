@@ -21,6 +21,13 @@ type SaveQuery struct {
 	DataSourceID int
 	// Tag は保存クエリに付けるタグ。重複検出はこのタグの付いた自分のクエリだけを見る。
 	Tag string
+	// AutoLimit は ad-hoc 実行に渡した apply_auto_limit。保存クエリの options に載せる。
+	//
+	// Query.query_hash は options.apply_auto_limit を適用した SQL から作られ
+	// （redash/models/__init__.py の update_query_hash）、作成時に同じハッシュの
+	// 最新結果が紐付く（QueryListResource.post の update_latest_result_by_query_hash）。
+	// 揃えておけば、人間が画面で Execute したときも agent と同じ LIMIT で走る。
+	AutoLimit bool
 }
 
 // SavedQuery は保存クエリの作成・再利用の結果。
@@ -40,12 +47,18 @@ type SavedQuery struct {
 // そのまま載せる値で、DataSource.paused のような int への化けは無い
 // （redash/models/__init__.py、redash/serializers/__init__.py）。
 type savedQuery struct {
-	ID           int64    `json:"id"`
-	Name         string   `json:"name"`
-	Query        string   `json:"query"`
-	DataSourceID int      `json:"data_source_id"`
-	IsDraft      bool     `json:"is_draft"`
-	Tags         []string `json:"tags"`
+	ID           int64        `json:"id"`
+	Name         string       `json:"name"`
+	Query        string       `json:"query"`
+	DataSourceID int          `json:"data_source_id"`
+	IsDraft      bool         `json:"is_draft"`
+	Tags         []string     `json:"tags"`
+	Options      queryOptions `json:"options"`
+}
+
+// queryOptions は保存クエリの options のうち sumiq が書くもの。
+type queryOptions struct {
+	ApplyAutoLimit bool `json:"apply_auto_limit"`
 }
 
 // savedQueryPage は GET /api/queries/my の応答（redash/handlers/base.py の paginate）。
@@ -69,7 +82,7 @@ const (
 // 重複検出に全文検索（?q=）は使わない。search_vector は tsvector で、
 // 名前に入れたハッシュが1語として索引される保証が無く、組織設定
 // multi_byte_search で照合方法自体が ilike に変わる。タグで絞った一覧を
-// 名前・SQL・データソースの完全一致で照合する。SQL まで見るのは、
+// 名前・SQL・データソース・apply_auto_limit の完全一致で照合する。SQL まで見るのは、
 // 人間が画面で SQL を書き換えた保存クエリを、別の SQL の URL として返さないため。
 func (c *Client) Save(ctx context.Context, q SaveQuery) (*SavedQuery, error) {
 	if q.Name == "" || q.Tag == "" {
@@ -140,7 +153,7 @@ func (c *Client) findSavedQuery(ctx context.Context, q SaveQuery) (*savedQuery, 
 		for i := range p.Results {
 			r := &p.Results[i]
 			if r.Name == q.Name && r.Query == q.SQL && r.DataSourceID == q.DataSourceID &&
-				slices.Contains(r.Tags, q.Tag) {
+				r.Options.ApplyAutoLimit == q.AutoLimit && slices.Contains(r.Tags, q.Tag) {
 				return r, nil
 			}
 		}
@@ -155,17 +168,19 @@ func (c *Client) findSavedQuery(ctx context.Context, q SaveQuery) (*savedQuery, 
 // createSavedQuery は POST /api/queries で保存クエリを作る。
 func (c *Client) createSavedQuery(ctx context.Context, q SaveQuery) (*savedQuery, error) {
 	body, err := json.Marshal(struct {
-		Name         string   `json:"name"`
-		Query        string   `json:"query"`
-		DataSourceID int      `json:"data_source_id"`
-		Tags         []string `json:"tags"`
-		IsDraft      bool     `json:"is_draft"`
+		Name         string       `json:"name"`
+		Query        string       `json:"query"`
+		DataSourceID int          `json:"data_source_id"`
+		Tags         []string     `json:"tags"`
+		IsDraft      bool         `json:"is_draft"`
+		Options      queryOptions `json:"options"`
 	}{
 		Name:         q.Name,
 		Query:        q.SQL,
 		DataSourceID: q.DataSourceID,
 		Tags:         []string{q.Tag},
 		IsDraft:      true,
+		Options:      queryOptions{ApplyAutoLimit: q.AutoLimit},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("リクエストを組み立てられませんでした: %w", err)

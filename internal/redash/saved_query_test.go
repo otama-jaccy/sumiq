@@ -90,9 +90,14 @@ func testSaveQuery() SaveQuery {
 
 // queryJSON は serialize_query と同じ形のクエリ1件を組み立てる。
 func queryJSON(id int64, name, sql string, dsID int, isDraft bool) string {
+	return queryJSONWithAutoLimit(id, name, sql, dsID, isDraft, false)
+}
+
+func queryJSONWithAutoLimit(id int64, name, sql string, dsID int, isDraft, autoLimit bool) string {
 	b, _ := json.Marshal(map[string]any{
 		"id": id, "name": name, "query": sql, "data_source_id": dsID,
 		"is_draft": isDraft, "tags": []string{"sumiq"}, "version": 1,
+		"options": map[string]any{"apply_auto_limit": autoLimit},
 	})
 	return string(b)
 }
@@ -103,6 +108,7 @@ func pageJSON(count int, items ...string) string {
 
 func TestSave_CreatesDraftWithTag(t *testing.T) {
 	q := testSaveQuery()
+	q.AutoLimit = true
 	f := &fakeQueries{t: t, create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, true))}
 	c := start(t, f, nil)
 
@@ -118,6 +124,7 @@ func TestSave_CreatesDraftWithTag(t *testing.T) {
 	want := map[string]any{
 		"name": q.Name, "query": q.SQL, "data_source_id": float64(3),
 		"tags": []any{"sumiq"}, "is_draft": true,
+		"options": map[string]any{"apply_auto_limit": true},
 	}
 	for k, v := range want {
 		if fmt.Sprint(body[k]) != fmt.Sprint(v) {
@@ -203,10 +210,12 @@ func TestSave_MarkDraftStillFalseIsError(t *testing.T) {
 func TestSave_ReusesExisting(t *testing.T) {
 	q := testSaveQuery()
 	f := &fakeQueries{t: t, list: map[string]string{
-		"1": pageJSON(3,
+		"1": pageJSON(4,
 			// 名前は同じだが人間が SQL を書き換えたもの、別データソースのものは再利用しない。
 			queryJSON(10, q.Name, "SELECT 1", 3, true),
 			queryJSON(11, q.Name, q.SQL, 4, true),
+			// apply_auto_limit が違うと、画面で Execute したときに別の LIMIT で走る。
+			queryJSONWithAutoLimit(13, q.Name, q.SQL, 3, true, true),
 			queryJSON(12, q.Name, q.SQL, 3, false),
 		),
 	}}

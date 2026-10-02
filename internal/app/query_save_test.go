@@ -93,6 +93,8 @@ func (f *saveFake) calls() []string {
 func savedQueryJSON(id int, name, sql string) string {
 	b, _ := json.Marshal(map[string]any{
 		"id": id, "name": name, "query": sql, "data_source_id": 3, "is_draft": true, "tags": []string{"sumiq"},
+		// runSaveQuery の設定は auto_limit: true。
+		"options": map[string]any{"apply_auto_limit": true},
 	})
 	return string(b)
 }
@@ -147,6 +149,9 @@ func TestQuery_SaveCreatesAndPrintsURLOnStderr(t *testing.T) {
 	}
 	if got, want := req["name"], wantSavedName(3, saveSQL); got != want {
 		t.Errorf("保存クエリの名前 = %v, want %v", got, want)
+	}
+	if got := fmt.Sprint(req["options"]); got != "map[apply_auto_limit:true]" {
+		t.Errorf("ad-hoc 実行と同じ apply_auto_limit を渡していません: %s", got)
 	}
 
 	url := srv.URL + "/queries/55"
