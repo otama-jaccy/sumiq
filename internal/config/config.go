@@ -52,6 +52,15 @@ type DataSource struct {
 	// Oracle / SQL Server のように apply_auto_limit でクエリが壊れる
 	// データソースを個別に false にするためのもの。
 	AutoLimit *bool `yaml:"auto_limit"`
+	// AliasGuard は列の由来（別名）を解析できなかったときの扱い。
+	//
+	// 未指定（ゼロ値）は strict。非 SQL のクエリランナーを繋いだ
+	// データソースだけ off にできる。off はマスクを弱める指定であり、
+	// レビューされない設定には書けない（merge.go の checkAliasGuard）。
+	//
+	// グローバル既定は設けない。SELECT を読めるかどうかはデータソースの
+	// 性質そのもので、全体に掛ける意味を持たないため。
+	AliasGuard AliasGuard `yaml:"alias_guard"`
 }
 
 // Query はクエリ実行時の行数の扱い。
@@ -72,6 +81,38 @@ type Masking struct {
 	// Rules は全レイヤの和集合として適用される。ローカル設定から共有設定を
 	// 弱められてはならないため、マージは追加のみを許す。
 	Rules []MaskRule `yaml:"rules"`
+	// PropagationExemptFunctions は別名へのマスク伝播を止める関数の許可リスト。
+	//
+	// count(email) AS n の n まで redact になるのを避けるための唯一の抜け道。
+	// 既定は空で、count のような関数も組み込みでは許さない。設定に書いて
+	// いない弱化が既定で効いていると、事故のときに「なぜ外れたか」を
+	// 設定から追えなくなる。
+	//
+	// マスクを弱める指定なので、レビューされる共有ファイルにのみ書ける。
+	PropagationExemptFunctions []ExemptFunction `yaml:"propagation_exempt_functions"`
+}
+
+// ExemptFunction はマスクの伝播を止める関数1件。
+//
+// 名前は完全一致・大文字小文字無視でのみ照合する。グロブも regex: も
+// 受け付けない。列パターンの方言（ADR-0003 §3）を持ち込むと、count* が
+// count_raw_emails のようなユーザ定義関数まで通してしまう。
+type ExemptFunction struct {
+	// Name は関数名。修飾なしの呼び出しにのみマッチする。
+	Name string `yaml:"name"`
+	// Note はなぜこの関数なら値が出ないのかを共有ファイルに残すための欄。
+	Note string `yaml:"note"`
+}
+
+// ExemptFunctionNames は許可リストの関数名だけを設定に書かれた順で返す。
+//
+// internal/sqlalias は config の型を知らない葉パッケージなので、名前だけを渡す。
+func (m Masking) ExemptFunctionNames() []string {
+	names := make([]string, len(m.PropagationExemptFunctions))
+	for i, f := range m.PropagationExemptFunctions {
+		names[i] = f.Name
+	}
+	return names
 }
 
 // MaskRule は列パターンとマスク方法の組。

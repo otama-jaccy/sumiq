@@ -9,6 +9,7 @@ import (
 
 	"github.com/otama-jaccy/sumiq/internal/config"
 	"github.com/otama-jaccy/sumiq/internal/redash"
+	"github.com/otama-jaccy/sumiq/internal/sqlalias"
 )
 
 const testDataSource = "analytics"
@@ -72,6 +73,49 @@ func result(cols []string, rows ...[]any) *redash.Result {
 	return res
 }
 
+// noAlias は列名をそのまま出力名にする SQL の解析結果を返す。
+//
+// 別名を使っていない（伝播が起きない）クエリを表す。列名は引用識別子にして
+// 渡すため、記号や空白を含む列名でもそのままの名前で出力列になる。
+func noAlias(t *testing.T, res *redash.Result) *sqlalias.Analysis {
+	t.Helper()
+	quoted := make([]string, 0, len(res.Columns))
+	for _, c := range res.Columns {
+		quoted = append(quoted, `"`+strings.ReplaceAll(c.Name, `"`, `""`)+`"`)
+	}
+	return mustAnalyze(t, "SELECT "+strings.Join(quoted, ", ")+" FROM t", nil)
+}
+
+// mustAnalyze は sql を解析する。判定不能なら失敗させる。
+func mustAnalyze(t *testing.T, sql string, exempt []string) *sqlalias.Analysis {
+	t.Helper()
+	a := sqlalias.Analyze(sql, exempt)
+	if u := a.Undetermined(); u != nil {
+		t.Fatalf("%s: 判定不能になりました: %v", sql, u)
+	}
+	return a
+}
+
+// apply は別名を使っていないクエリとして Apply を通す。
+func apply(t *testing.T, e *Engine, res *redash.Result) (*redash.Result, Summary) {
+	t.Helper()
+	got, sum, err := e.Apply(res, noAlias(t, res))
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	return got, sum
+}
+
+// applySQL は sql を実行した結果として Apply を通す。伝播を見るテストで使う。
+func applySQL(t *testing.T, e *Engine, sql string, exempt []string, res *redash.Result) (*redash.Result, Summary) {
+	t.Helper()
+	got, sum, err := e.Apply(res, mustAnalyze(t, sql, exempt))
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	return got, sum
+}
+
 // columnNames は結果の列名を返す。
 func columnNames(res *redash.Result) []string {
 	names := make([]string, 0, len(res.Columns))
@@ -81,16 +125,22 @@ func columnNames(res *redash.Result) []string {
 	return names
 }
 
-// methodOf はサマリから列に適用された method を取り出す。
-func methodOf(t *testing.T, s Summary, column string) config.MaskMethod {
+// columnMaskOf はサマリから列1つの記録を取り出す。
+func columnMaskOf(t *testing.T, s Summary, column string) ColumnMask {
 	t.Helper()
 	for _, c := range s.Columns {
 		if c.Name == column {
-			return c.Method
+			return c
 		}
 	}
 	t.Fatalf("サマリに列 %q がありません: %+v", column, s.Columns)
-	return ""
+	return ColumnMask{}
+}
+
+// methodOf はサマリから列に適用された method を取り出す。
+func methodOf(t *testing.T, s Summary, column string) config.MaskMethod {
+	t.Helper()
+	return columnMaskOf(t, s, column).Method
 }
 
 func TestApplyMasksEachMethod(t *testing.T) {
@@ -111,10 +161,7 @@ func TestApplyMasksEachMethod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newEngine(t, masking(tt.rule))
-			got, sum, err := e.Apply(result([]string{"email"}, []any{"user@example.com"}))
-			if err != nil {
-				t.Fatalf("Apply: %v", err)
-			}
+			got, sum := apply(t, e, result([]string{"email"}, []any{"user@example.com"}))
 			if got.Rows[0][0] != tt.want {
 				t.Errorf("値 = %#v, want %#v", got.Rows[0][0], tt.want)
 			}
@@ -134,10 +181,7 @@ func TestApplyDropRemovesColumn(t *testing.T) {
 		[]any{"1", "s1", "a"},
 		[]any{"2", "s2", "b"})
 
-	got, sum, err := e.Apply(in)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	got, sum := apply(t, e, in)
 
 	if want := []string{"id", "name"}; !reflect.DeepEqual(columnNames(got), want) {
 		t.Errorf("列 = %v, want %v", columnNames(got), want)
@@ -147,8 +191,8 @@ func TestApplyDropRemovesColumn(t *testing.T) {
 	if !reflect.DeepEqual(got.Rows, want) {
 		t.Errorf("行 = %#v, want %#v", got.Rows, want)
 	}
-	if !reflect.DeepEqual(sum.Dropped(), []string{"secret"}) {
-		t.Errorf("Dropped() = %v, want [secret]", sum.Dropped())
+	if want := []ColumnMask{{Name: "secret", Method: config.MaskDrop}}; !reflect.DeepEqual(sum.Dropped(), want) {
+		t.Errorf("Dropped() = %+v, want %+v", sum.Dropped(), want)
 	}
 	// drop された列は出力を見ても存在が分からない。サマリには必ず残す。
 	if m := methodOf(t, sum, "secret"); m != config.MaskDrop {
@@ -161,9 +205,7 @@ func TestApplyDoesNotMutateInput(t *testing.T) {
 	e := newEngine(t, masking(rule(config.MaskRedact, "email"), rule(config.MaskDrop, "memo")))
 	in := result([]string{"id", "email", "memo"}, []any{"1", "user@example.com", "note"})
 
-	if _, _, err := e.Apply(in); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	apply(t, e, in)
 
 	if want := []string{"id", "email", "memo"}; !reflect.DeepEqual(columnNames(in), want) {
 		t.Errorf("入力の列 = %v, want %v", columnNames(in), want)
@@ -180,10 +222,7 @@ func TestSummaryCoversAllColumns(t *testing.T) {
 		rule(config.MaskDrop, "memo"),
 	))
 
-	_, sum, err := e.Apply(result([]string{"id", "email", "memo"}, []any{"1", "a@example.com", "x"}))
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	_, sum := apply(t, e, result([]string{"id", "email", "memo"}, []any{"1", "a@example.com", "x"}))
 
 	want := []ColumnMask{
 		{Name: "id", Method: config.MaskNone},
@@ -265,10 +304,7 @@ func TestDefaultAction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			got, sum, err := e.Apply(result([]string{"col"}, []any{"plain"}))
-			if err != nil {
-				t.Fatalf("Apply: %v", err)
-			}
+			got, sum := apply(t, e, result([]string{"col"}, []any{"plain"}))
 			if got.Rows[0][0] != tt.want {
 				t.Errorf("値 = %#v, want %#v", got.Rows[0][0], tt.want)
 			}
@@ -305,10 +341,7 @@ func TestDataSourceScope(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			got, sum, err := e.Apply(result([]string{"memo"}, []any{"plain"}))
-			if err != nil {
-				t.Fatalf("Apply: %v", err)
-			}
+			got, sum := apply(t, e, result([]string{"memo"}, []any{"plain"}))
 			masked := got.Rows[0][0] != "plain"
 			if masked != tt.wantMasked {
 				t.Errorf("マスクされた = %v (値 %#v), want %v", masked, got.Rows[0][0], tt.wantMasked)
@@ -366,10 +399,7 @@ func TestOtherDataSourceRuleIsValidated(t *testing.T) {
 // 値が無いという事実が漏れる。
 func TestApplyMasksNullValues(t *testing.T) {
 	e := newEngine(t, masking(rule(config.MaskRedact, "a"), rule(config.MaskHash, "b")))
-	got, _, err := e.Apply(result([]string{"a", "b"}, []any{nil, nil}))
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	got, _ := apply(t, e, result([]string{"a", "b"}, []any{nil, nil}))
 	if got.Rows[0][0] != "****" {
 		t.Errorf("redact した NULL = %#v, want ****", got.Rows[0][0])
 	}
@@ -385,10 +415,7 @@ func TestApplyShortRow(t *testing.T) {
 		Columns: []redash.Column{{Name: "a"}, {Name: "b"}, {Name: "c"}},
 		Rows:    []redash.Row{{"1"}},
 	}
-	got, _, err := e.Apply(in)
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	got, _ := apply(t, e, in)
 	want := redash.Row{"1", "****", nil}
 	if !reflect.DeepEqual(got.Rows[0], want) {
 		t.Errorf("行 = %#v, want %#v", got.Rows[0], want)
@@ -398,7 +425,17 @@ func TestApplyShortRow(t *testing.T) {
 // TestApplyNilResult は結果が無いことを空の結果に倒さないことを見る。
 func TestApplyNilResult(t *testing.T) {
 	e := newEngine(t, masking())
-	if _, _, err := e.Apply(nil); err == nil {
+	if _, _, err := e.Apply(nil, sqlalias.Analyze("SELECT 1", nil)); err == nil {
+		t.Fatal("エラーになりませんでした")
+	}
+}
+
+// TestApplyNilAnalysis は解析結果を渡し忘れたことを「由来なし」に倒さないことを見る。
+//
+// nil を空の解析として扱うと、別名で改名された列の伝播が丸ごと消えたまま実行される。
+func TestApplyNilAnalysis(t *testing.T) {
+	e := newEngine(t, masking(rule(config.MaskRedact, "email")))
+	if _, _, err := e.Apply(result([]string{"email"}, []any{"a@example.com"}), nil); err == nil {
 		t.Fatal("エラーになりませんでした")
 	}
 }

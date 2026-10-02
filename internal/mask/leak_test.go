@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/otama-jaccy/sumiq/internal/config"
+	"github.com/otama-jaccy/sumiq/internal/redash"
 )
 
 // このファイルは「マッチするルールがあるのにマスクされない」ケースが
@@ -53,10 +54,7 @@ func TestAllowlistHoleIsWholeMatch(t *testing.T) {
 	for i := range row {
 		row[i] = secretValue
 	}
-	got, _, err := e.Apply(result(cols, row))
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	got, _ := apply(t, e, result(cols, row))
 
 	if got.Rows[0][0] != secretValue {
 		t.Errorf("穴を開けた列 user_id = %#v, want %q", got.Rows[0][0], secretValue)
@@ -148,10 +146,7 @@ func TestDefaultRedactMasksEveryColumn(t *testing.T) {
 	for i := range row {
 		row[i] = secretValue
 	}
-	got, sum, err := e.Apply(result(leakColumns, row))
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	got, sum := apply(t, e, result(leakColumns, row))
 	for i, c := range leakColumns {
 		if got.Rows[0][i] != redacted {
 			t.Errorf("列 %q = %#v, want %q", c, got.Rows[0][i], redacted)
@@ -171,13 +166,25 @@ func assertMasked(t *testing.T, column string, method config.MaskMethod, r confi
 		t.Fatalf("New: %v", err)
 	}
 
-	got, sum, err := e.Apply(result([]string{column}, []any{secretValue}))
-	if err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
+	got, sum := apply(t, e, result([]string{column}, []any{secretValue}))
+	assertNoResidue(t, got, sum, column, method, "")
+}
 
-	if m := methodOf(t, sum, column); m != method {
-		t.Fatalf("サマリの method = %q, want %q", m, method)
+// assertNoResidue は column が method の通りにマスクされ、元の値が出力に
+// 残っていないことを見る。wantVia が空でなければ伝播元も確かめる。
+//
+// マスクが外れていないことの判定はここ1か所に集める。直接マッチと伝播で
+// 別々に書くと、片方にだけ検査を足したときに、もう片方が緩いまま残る。
+func assertNoResidue(t *testing.T, got *redash.Result, sum Summary,
+	column string, method config.MaskMethod, wantVia string) {
+	t.Helper()
+
+	c := columnMaskOf(t, sum, column)
+	if c.Method != method {
+		t.Fatalf("サマリの method = %q, want %q", c.Method, method)
+	}
+	if wantVia != "" && c.Via != wantVia {
+		t.Errorf("列 %q の Via = %q, want %q", column, c.Via, wantVia)
 	}
 
 	if method == config.MaskDrop {
@@ -198,4 +205,73 @@ func assertMasked(t *testing.T, column string, method config.MaskMethod, r confi
 	if s, ok := v.(string); ok && strings.Contains(s, "@example.com") && method != config.MaskPartial {
 		t.Fatalf("%s なのに値の一部が残っています: %q", method, s)
 	}
+}
+
+// aliasRenames は email を別の名前で返すクエリ。結果列名は email に
+// マッチしないため、伝播が効いていなければマスクが外れる。
+var aliasRenames = []struct {
+	name   string
+	sql    string
+	column string
+}{
+	{"AS で改名する", "SELECT email AS contact FROM users", "contact"},
+	{"AS を省略して改名する", "SELECT email contact FROM users", "contact"},
+	{"修飾付きの列を改名する", "SELECT u.email AS user_contact FROM users u", "user_contact"},
+	{"式に混ぜて改名する", "SELECT lower(email) AS contact FROM users", "contact"},
+	{"CTE をまたいで改名する",
+		"WITH u AS (SELECT email AS c1 FROM users) SELECT c1 AS contact FROM u", "contact"},
+	{"サブクエリをまたいで改名する",
+		"SELECT t.c1 AS contact FROM (SELECT email AS c1 FROM users) t", "contact"},
+	{"UNION の片方の枝で改名する",
+		"SELECT contact FROM other UNION ALL SELECT email AS contact FROM users", "contact"},
+	{"引用識別子で改名する",
+		`SELECT email AS "payload/user/email" FROM users`, "payload/user/email"},
+	{"内側で改名して外側は * を書く",
+		"SELECT * FROM (SELECT email AS contact FROM users) t", "contact"},
+}
+
+// TestAliasDoesNotDropMask は別名を付けただけではマスクが外れないことを見る。
+//
+// 伝播を無効化する1行（Apply が Origin を見ない、closure が空を返す、
+// resolveWithOrigin が stronger を取らない）を入れると落ちる。通っている
+// ことの確認だけでは、伝播が効いているかは分からない。
+func TestAliasDoesNotDropMask(t *testing.T) {
+	for _, r := range aliasRenames {
+		for _, method := range maskingMethods {
+			t.Run(fmt.Sprintf("%s/%s", r.name, method), func(t *testing.T) {
+				assertPropagated(t, r.sql, r.column, method, nil)
+			})
+		}
+	}
+}
+
+// TestExemptFunctionDoesNotOpenAHole は許可関数を設定しても、その関数を
+// 通していない別名には伝播が効くことを見る。
+//
+// 止まるのは「許可関数の内側にだけ現れた列」だけ。関数名で切った許可が
+// 列そのものへの許可に広がっていないことを確かめる。
+func TestExemptFunctionDoesNotOpenAHole(t *testing.T) {
+	exempt := []string{"count"}
+	for _, method := range maskingMethods {
+		t.Run(string(method), func(t *testing.T) {
+			// 許可関数を通していない単純な別名。
+			assertPropagated(t, "SELECT email AS n FROM users", "n", method, exempt)
+			// 許可関数の外にも現れている場合。
+			assertPropagated(t, "SELECT count(email) OVER (PARTITION BY email) AS n FROM users",
+				"n", method, exempt)
+			// 許可していない関数。
+			assertPropagated(t, "SELECT min(email) AS n FROM users", "n", method, exempt)
+			// スキーマ修飾付きの呼び出しは許可リストに当たらない。
+			assertPropagated(t, "SELECT pg_catalog.count(email) AS n FROM users", "n", method, exempt)
+		})
+	}
+}
+
+// assertPropagated は email に掛けたルールが、改名された列にも効くことを見る。
+func assertPropagated(t *testing.T, sql, column string, method config.MaskMethod, exempt []string) {
+	t.Helper()
+
+	e := newEngine(t, masking(ruleFor(method, "email")))
+	got, sum := applySQL(t, e, sql, exempt, result([]string{column}, []any{secretValue}))
+	assertNoResidue(t, got, sum, column, method, "email")
 }

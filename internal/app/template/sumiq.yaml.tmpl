@@ -38,6 +38,16 @@ data_sources:
     # Example of overriding auto_limit per data source (see the "auto_limit"
     # section in README.md).
     auto_limit: false
+    # sumiq traces where each result column comes from, so that renaming a
+    # column (SELECT email AS contact) doesn't drop its mask. When the query
+    # can't be traced at all — it contains no SELECT (non-SQL query runners,
+    # SHOW / CALL), can't be read, has an expression whose output name can't
+    # be determined, or renames columns with a column alias list such as
+    # WITH q(c) AS (...) — sumiq refuses to run it (alias_guard: strict, the
+    # default). Set alias_guard: off for data sources where that happens by
+    # nature; propagation still applies to whatever was analyzed. Only this
+    # file (the shared config) may set it to off.
+    # alias_guard: strict
 
 query:
   # auto_limit is an optimization; max_rows is the actual safety net
@@ -56,6 +66,22 @@ masking:
   # Can be overridden per data source (data_sources[].default_action above).
   # Local config cannot override this to a looser value.
   default_action: none
+
+  # Functions whose arguments must NOT propagate their mask to the output
+  # column. Without this, SELECT count(email) AS n makes n inherit email's
+  # mask. Empty by default — not even count is built in, so that every
+  # weakening is visible in this file. Names are matched exactly and
+  # case-insensitively; globs, regex:, and schema-qualified names such as
+  # pg_catalog.count are rejected or simply don't match.
+  #
+  # Be careful with min / max / sum / avg: for a group with few rows they
+  # return the original value itself (with one row, sum is the value).
+  #
+  # This only stops propagation. Under default_action: redact the column is
+  # still masked unless you also add a method: none rule for it.
+  # propagation_exempt_functions:
+  #   - name: count
+  #     note: "Only a row count comes out, never the value itself."
 
   rules:
     # Patterns are glob by default (case-insensitive; * matches any run of
@@ -103,6 +129,11 @@ masking:
       note: "Required for aggregation and not personally identifying. Added to the allowlist."
 
 output:
-  # table / json / csv. Can be overridden per invocation with the CLI's
-  # --format flag (CLI flags take the highest precedence).
+  # table / json / csv.
+  #
+  # Known limitation: this key is currently not consumed. `sumiq query` and
+  # `sumiq data-sources list` both take --format, which carries its own default
+  # of `table`, so the flag always decides the output format. The value here is
+  # still validated (an invalid one fails the load), it just doesn't reach the
+  # renderer yet. See docs/configuration.md#output.
   format: table

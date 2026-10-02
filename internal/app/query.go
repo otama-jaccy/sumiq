@@ -9,6 +9,7 @@ import (
 	"github.com/otama-jaccy/sumiq/internal/output"
 	"github.com/otama-jaccy/sumiq/internal/redash"
 	"github.com/otama-jaccy/sumiq/internal/rowguard"
+	"github.com/otama-jaccy/sumiq/internal/sqlalias"
 )
 
 // QueryParams は Query 1回分の呼び出しパラメータ。コマンドライン引数の詰め替え先。
@@ -55,11 +56,21 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		return err
 	}
 
-	// マスクルールの検証はネットワークに依存しない。Redash へのクエリ実行
+	// 列の由来（別名）の解析はネットワークに依存しない。
+	analysis := sqlalias.Analyze(p.SQL, resolved.Config.Masking.ExemptFunctionNames())
+
+	// マスクルールの検証もネットワークに依存しない。Redash へのクエリ実行
 	// （時間のかかるジョブ投入・ポーリングを伴う）より前に済ませ、設定の
 	// 誤りを実行前に検出する。
 	engine, err := mask.New(resolved.Config, p.DataSource)
 	if err != nil {
+		return err
+	}
+
+	// alias_guard: strict（既定）で由来を辿れなければ、Redash に一切
+	// リクエストを飛ばさずここで止める。判定不能をどう扱うかは
+	// internal/mask が決める（app では判定しない）。
+	if err := engine.PrecheckAlias(analysis); err != nil {
 		return err
 	}
 
@@ -96,9 +107,19 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		return err
 	}
 
-	masked, sum, err := engine.Apply(res)
+	masked, sum, err := engine.Apply(res, analysis)
 	if err != nil {
 		return err
+	}
+
+	// ここに来るのは alias_guard: off のときだけ（strict は上で止まる）。
+	// 伝播が効いていないことは出力を見ても分からないため、毎回警告を出す。
+	if u := sum.AliasUndetermined; u != nil {
+		if _, err := fmt.Fprintf(deps.Err, "Warning: SQL から結果列の由来を辿れませんでした（%v）。"+
+			"alias_guard: %s のため実行を続けました。別名で改名された列にマスクは伝播していません。\n",
+			u, config.AliasGuardOff); err != nil {
+			return fmt.Errorf("警告を書き出せませんでした: %w", err)
+		}
 	}
 
 	return output.Render(deps.Out, deps.Err, p.Format, masked, sum, deps.TTY)

@@ -82,6 +82,34 @@ func (a *Action) UnmarshalYAML(n *yaml.Node) error {
 	return unmarshalEnum(n, "default_action", actions(), a)
 }
 
+// AliasGuard は列の由来（別名）を解析できなかったときの扱い。
+type AliasGuard string
+
+const (
+	// AliasGuardStrict は解析できなければエラーにして実行を拒否する。未指定の既定。
+	AliasGuardStrict AliasGuard = "strict"
+	// AliasGuardOff は解析できなくても実行する。解析できた範囲の伝播は止めない。
+	AliasGuardOff AliasGuard = "off"
+)
+
+func aliasGuards() []AliasGuard {
+	return []AliasGuard{AliasGuardStrict, AliasGuardOff}
+}
+
+// Strict は判定不能を実行拒否として扱うかを返す。
+//
+// ゼロ値（未指定）は strict。安全側の既定をこの述語1つに閉じる。
+// 呼び出し側が空文字列と比べて既定を組み立てると、比べ忘れた場所だけ
+// 検査が消える。
+func (g AliasGuard) Strict() bool {
+	return g != AliasGuardOff
+}
+
+// UnmarshalYAML は不正な値を行番号付きで弾く。
+func (g *AliasGuard) UnmarshalYAML(n *yaml.Node) error {
+	return unmarshalEnum(n, "alias_guard", aliasGuards(), g)
+}
+
 // OnExceed は max_rows を超えたときの挙動。
 type OnExceed string
 

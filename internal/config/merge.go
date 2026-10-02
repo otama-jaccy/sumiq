@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // マージ規則の一覧。項目ごとに規則が違うのは ADR-0003 の意図した設計であり、
@@ -16,11 +17,14 @@ import (
 //	redash.api_key / api_key_command  組で上書き。同一レイヤで両方指定はエラー
 //	masking.rules                     和集合（追加のみ。削除・上書きは不可）
 //	masking.default_action            厳しくする方向のみ上書き可。緩める指定はエラー
+//	masking.propagation_exempt_...    和集合（追加のみ）。名前の重複はエラー
 //	data_sources                      名前で追加。同一ファイル内の重複はエラー。由来を保持する
 //
 // これに加えて、レビューされないレイヤ（ユーザ設定 / ローカル設定）には次の制約がかかる。
 //
 //	masking.rules の method: none     共有ファイルにのみ書ける。それ以外にあればエラー
+//	masking.propagation_exempt_...    共有ファイルにのみ書ける。それ以外にあればエラー
+//	data_sources の alias_guard: off  共有ファイルにのみ書ける。それ以外にあればエラー
 //	masking.rules の method の強さ    default_action: redact なスコープでは
 //	                                  redact 以上の強さが必要（下記参照）
 //	data_sources の差し替え           共有設定で定義済みの名前は上書きできない
@@ -253,6 +257,38 @@ func (r *Resolved) mergeMasking(dst *Masking, l layered) error {
 		rule.Origin = RuleOrigin{layer: l.layer, path: l.path, index: i}
 		dst.Rules = append(dst.Rules, rule)
 	}
+
+	return mergeExemptFunctions(dst, l)
+}
+
+// mergeExemptFunctions は伝播を止める関数の許可リストを畳む。
+//
+// rules と同じ和集合。許可リストはマスクを弱める唯一の抜け道なので、
+// method: none と同じくレビューされる共有ファイルにのみ書ける。
+//
+// 名前の重複は、同じファイル内でもファイルをまたいでもエラーにする。
+// 黙って重ねると、片方の note（なぜ通してよいか）だけが読まれた状態で
+// もう片方の指定が効き続ける。
+func mergeExemptFunctions(dst *Masking, l layered) error {
+	src := l.cfg.Masking.PropagationExemptFunctions
+	if len(src) == 0 {
+		return nil
+	}
+	if !l.layer.Reviewed() {
+		return fmt.Errorf("%s: masking.propagation_exempt_functions は共有ファイル（%s）にのみ"+
+			"書けます。マスクの伝播を止める指定はレビューの対象でなければなりません",
+			l.origin(), SharedFileName)
+	}
+	for i, f := range src {
+		for _, prev := range dst.PropagationExemptFunctions {
+			if strings.EqualFold(prev.Name, f.Name) {
+				return fmt.Errorf("%s: masking.propagation_exempt_functions[%d] (%s): "+
+					"同じ関数名が2回指定されています。大文字小文字は区別しません",
+					l.origin(), i, f.Name)
+			}
+		}
+		dst.PropagationExemptFunctions = append(dst.PropagationExemptFunctions, f)
+	}
 	return nil
 }
 
@@ -269,6 +305,15 @@ func (r *Resolved) mergeMasking(dst *Masking, l layered) error {
 //     許すと、レビュー済みの id や default_action をローカルから置き換えられる
 func (r *Resolved) mergeDataSources(l layered) error {
 	for i, ds := range l.cfg.DataSources {
+		// alias_guard: off は「列の由来を解析できなくても実行する」という
+		// 弱化そのもの。畳む前のレイヤごとの指定を見る。畳んだ後の値では、
+		// 名前の勝ち負けと項目ごとの引き継ぎ（mergeDataSource）を経るため、
+		// レビューされないファイルに書かれた off が共有設定の定義に紛れ込む。
+		if ds.AliasGuard == AliasGuardOff && !l.layer.Reviewed() {
+			return fmt.Errorf("%s: data_sources[%d] (%s): alias_guard: %q は共有ファイル（%s）にのみ"+
+				"書けます。列の由来を解析できないまま実行する指定はレビューの対象でなければなりません",
+				l.origin(), i, ds.Name, AliasGuardOff, SharedFileName)
+		}
 		prev, exists := r.dataSourceOrigins[ds.Name]
 		switch {
 		case !exists:
@@ -319,6 +364,9 @@ func mergeDataSource(dst, src DataSource) DataSource {
 	if src.AutoLimit != nil {
 		v := *src.AutoLimit
 		dst.AutoLimit = &v
+	}
+	if src.AliasGuard != "" {
+		dst.AliasGuard = src.AliasGuard
 	}
 	return dst
 }

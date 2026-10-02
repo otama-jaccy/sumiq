@@ -69,29 +69,70 @@ func Render(out, errW io.Writer, format Format, res *redash.Result, sum mask.Sum
 
 // writeSummary はマスクサマリを stderr 向けに書く（ADR-0004 §5）。
 //
-//	Masked: email (partial), memo (redact)
+//	Masked: email (partial), contact (redact, email 由来)
 //	Dropped: --
+//	Exempted: n (none, count が email の伝播を止めた)
 //	Rows: 342
 //
-// 行数が 0 件でも省略しない。マスクされた列が無いことと、まだ結果を見て
-// いないことは区別できないため、毎回同じ3行を出す。
+// 該当が無くてもどの行も省略しない。マスクされた列が無いことと、まだ結果を
+// 見ていないことは区別できないため、毎回同じ4行を出す。
+//
+// Exempted も同じ理由で毎回出す。許可関数（propagation_exempt_functions）で
+// 伝播が止まったのはマスクの弱化であり、起きなかった回と区別が付かなければ
+// 通知の意味が無い。
+//
+// 別名から伝播したマスクには由来（email 由来）を添える。internal/sqlalias は
+// 過剰近似でスコープも潰すため、身に覚えのない列が伏せられたときに原因を
+// 辿れるのはここだけになる。
 func writeSummary(errW io.Writer, sum mask.Summary, rows int) error {
-	maskedStr := noneMarker
-	if masked := sum.MaskedKept(); len(masked) > 0 {
-		parts := make([]string, len(masked))
-		for i, c := range masked {
-			parts[i] = fmt.Sprintf("%s (%s)", c.Name, c.Method)
-		}
-		maskedStr = strings.Join(parts, ", ")
-	}
-
-	droppedStr := noneMarker
-	if dropped := sum.Dropped(); len(dropped) > 0 {
-		droppedStr = strings.Join(dropped, ", ")
-	}
-
-	_, err := fmt.Fprintf(errW, "Masked: %s\nDropped: %s\nRows: %d\n", maskedStr, droppedStr, rows)
+	_, err := fmt.Fprintf(errW, "Masked: %s\nDropped: %s\nExempted: %s\nRows: %d\n",
+		columnList(sum.MaskedKept(), methodDetail),
+		columnList(sum.Dropped(), viaDetail),
+		columnList(sum.Exempted(), exemptedDetail),
+		rows)
 	return err
+}
+
+// columnList は列を並べる。detail が空を返した列は名前だけを出す。
+// 該当する列が無ければ noneMarker を返す。
+func columnList(cols []mask.ColumnMask, detail func(mask.ColumnMask) string) string {
+	if len(cols) == 0 {
+		return noneMarker
+	}
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = c.Name
+		if d := detail(c); d != "" {
+			parts[i] += " (" + d + ")"
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// methodDetail は方法と、伝播で決まったならその由来を返す。
+func methodDetail(c mask.ColumnMask) string {
+	if c.Via == "" {
+		return string(c.Method)
+	}
+	return string(c.Method) + ", " + viaDetail(c)
+}
+
+// viaDetail は伝播元を返す。直接マッチで決まったなら空。
+// drop で消えた列は方法が自明なので、由来だけを添える。
+func viaDetail(c mask.ColumnMask) string {
+	if c.Via == "" {
+		return ""
+	}
+	return c.Via + " 由来"
+}
+
+// exemptedDetail は方法と、どの許可関数がどの列の伝播を止めたかを返す。
+func exemptedDetail(c mask.ColumnMask) string {
+	stops := make([]string, len(c.Exempted))
+	for i, x := range c.Exempted {
+		stops[i] = fmt.Sprintf("%s が %s の伝播を止めた", x.Function, x.Column)
+	}
+	return string(c.Method) + ", " + strings.Join(stops, "、")
 }
 
 // columnNames は列名だけを入力順に取り出す。table と csv のヘッダで共有する。

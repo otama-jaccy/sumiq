@@ -53,9 +53,33 @@ type baseConfigOpts struct {
 	endpoint  string
 	maxRows   int
 	autoLimit bool
+	// aliasGuard は analytics の alias_guard。空なら書かない（既定の strict）。
+	aliasGuard string
+	// dsDefaultAction は analytics の default_action。空なら書かない。
+	dsDefaultAction string
+	// exemptFunctions は masking.propagation_exempt_functions に挙げる関数名。
+	exemptFunctions []string
+	// extraRules は masking.rules に足す YAML 断片。インデントを含めて書く。
+	extraRules string
 }
 
 func baseConfig(o baseConfigOpts) string {
+	dataSource := "  - name: analytics\n    id: 3\n"
+	if o.aliasGuard != "" {
+		dataSource += "    alias_guard: " + o.aliasGuard + "\n"
+	}
+	if o.dsDefaultAction != "" {
+		dataSource += "    default_action: " + o.dsDefaultAction + "\n"
+	}
+
+	exempt := ""
+	for _, f := range o.exemptFunctions {
+		if exempt == "" {
+			exempt = "  propagation_exempt_functions:\n"
+		}
+		exempt += "    - name: " + f + "\n      note: \"テスト用\"\n"
+	}
+
 	return fmt.Sprintf(`
 version: 1
 redash:
@@ -63,20 +87,18 @@ redash:
   timeout: 5s
   poll_interval: 10ms
 data_sources:
-  - name: analytics
-    id: 3
-query:
+%squery:
   auto_limit: %t
   max_rows: %d
   on_exceed: error
 masking:
   default_action: none
-  rules:
+%s  rules:
     - patterns: ["email"]
       method: redact
-output:
+%soutput:
   format: table
-`, o.endpoint, o.autoLimit, o.maxRows)
+`, o.endpoint, dataSource, o.autoLimit, o.maxRows, exempt, o.extraRules)
 }
 
 // newTestDeps は dir を設定探索の起点にした Deps と、その Out / Err の
@@ -218,5 +240,148 @@ func TestQuery_InvalidMaskRuleFailsBeforeNetworkCall(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("不正なマスクルールでエラーになりませんでした")
+	}
+}
+
+// TestQuery_別名にマスクが伝播する は、別名を付けてもマスクが外れないことと、
+// 通知に由来が出ることを見る。
+func TestQuery_別名にマスクが伝播する(t *testing.T) {
+	srv := fakeRedash(t, col("contact", "string"), `{"contact":"a@example.com"}`)
+	dir := t.TempDir()
+	writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{endpoint: srv.URL, maxRows: 1000, autoLimit: true}))
+	deps, out, errW := newTestDeps(dir)
+
+	err := Query(context.Background(), deps, QueryParams{
+		DataSource: "analytics",
+		Format:     output.JSON,
+		SQL:        "SELECT email AS contact FROM users",
+	})
+	if err != nil {
+		t.Fatalf("Query() 失敗: %v", err)
+	}
+
+	if got := out.String(); !strings.Contains(got, `"contact":"****"`) {
+		t.Errorf("別名の列がマスクされていません: %s", got)
+	}
+	if got := errW.String(); !strings.Contains(got, "Masked: contact (redact, email 由来)") {
+		t.Errorf("通知に由来が出ていません: %s", got)
+	}
+}
+
+// TestQuery_AliasGuardStrictはネットワークに出る前に落ちる は、判定不能な
+// クエリで Redash にリクエストが1つも飛ばないことを見る。
+//
+// 解析はネットワークに依存しないため、mask.New と同じく実行前に済ませる。
+func TestQuery_AliasGuardStrictはネットワークに出る前に落ちる(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("列の由来を解析できないまま Redash へリクエストが送られました: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	dir := t.TempDir()
+	writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{endpoint: srv.URL, maxRows: 1000, autoLimit: true}))
+	deps, _, _ := newTestDeps(dir)
+
+	err := Query(context.Background(), deps, QueryParams{
+		DataSource: "analytics",
+		Format:     output.JSON,
+		SQL:        "SHOW TABLES",
+	})
+	if err == nil {
+		t.Fatal("判定不能なクエリでエラーになりませんでした")
+	}
+	// 何が読めなかったかと、どうすれば通るかの両方を文言に含める。
+	for _, want := range []string{"SELECT", "alias_guard", "off", "sumiq.yaml"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("エラー文言 %q に %q が含まれていません", err.Error(), want)
+		}
+	}
+}
+
+// TestQuery_AliasGuardOffは警告を出して続ける は、off なら実行が続き、
+// 判定不能だったことが stderr に出ることを見る。
+func TestQuery_AliasGuardOffは警告を出して続ける(t *testing.T) {
+	srv := fakeRedash(t, col("email", "string"), `{"email":"a@example.com"}`)
+	dir := t.TempDir()
+	writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{
+		endpoint: srv.URL, maxRows: 1000, autoLimit: true, aliasGuard: "off",
+	}))
+	deps, out, errW := newTestDeps(dir)
+
+	err := Query(context.Background(), deps, QueryParams{
+		DataSource: "analytics",
+		Format:     output.JSON,
+		SQL:        "SHOW TABLES",
+	})
+	if err != nil {
+		t.Fatalf("Query() 失敗: %v", err)
+	}
+
+	if got := errW.String(); !strings.Contains(got, "Warning: SQL から結果列の由来を辿れませんでした") {
+		t.Errorf("警告が出ていません: %s", got)
+	}
+	// 名前で照合する通常のマスクは、解析できなくても効き続ける。
+	if got := out.String(); !strings.Contains(got, `"email":"****"`) {
+		t.Errorf("email がマスクされていません: %s", got)
+	}
+}
+
+// TestQuery_許可リストだけでは allowlist に穴は開かない は、伝播を止めても
+// default_action: redact はそのまま効くことを見る。
+//
+// 通したい列は他の列と同じく method: none を共有ファイルに書く。許可リストは
+// 伝播を止めるだけの仕組みで、allowlist の穴を開ける手段ではない。
+func TestQuery_許可リストだけではallowlistに穴は開かない(t *testing.T) {
+	tests := []struct {
+		name       string
+		extraRules string
+		want       string
+		wantErrW   string
+	}{
+		{
+			name: "許可リストだけでは通らない",
+			want: `"n":"****"`,
+			// 伏せられたままなので弱化は起きていない。通知にも出さない。
+			wantErrW: "Exempted: --",
+		},
+		{
+			name:       "method: none の穴と併用して初めて通る",
+			extraRules: "    - patterns: [\"n\"]\n      method: none\n",
+			want:       `"n":3`,
+			// 素通りしたので弱化が起きている。毎回見える形で出す。
+			wantErrW: "Exempted: n (none, count が email の伝播を止めた)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := fakeRedash(t, col("n", "integer"), `{"n":3}`)
+			dir := t.TempDir()
+			writeConfig(t, dir, "sumiq.yaml", baseConfig(baseConfigOpts{
+				endpoint: srv.URL, maxRows: 1000, autoLimit: true,
+				dsDefaultAction: "redact",
+				exemptFunctions: []string{"count"},
+				extraRules:      tt.extraRules,
+			}))
+			deps, out, errW := newTestDeps(dir)
+
+			err := Query(context.Background(), deps, QueryParams{
+				DataSource: "analytics",
+				Format:     output.JSON,
+				SQL:        "SELECT count(email) AS n FROM users",
+			})
+			if err != nil {
+				t.Fatalf("Query() 失敗: %v", err)
+			}
+			if got := out.String(); !strings.Contains(got, tt.want) {
+				t.Errorf("出力 = %s, want に %q を含む", got, tt.want)
+			}
+			if got := errW.String(); !strings.Contains(got, tt.wantErrW) {
+				t.Errorf("通知 = %s, want に %q を含む", got, tt.wantErrW)
+			}
+		})
 	}
 }
