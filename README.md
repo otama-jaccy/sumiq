@@ -31,6 +31,13 @@ control.
 go install github.com/otama-jaccy/sumiq/cmd/sumiq@latest
 ```
 
+To pin a specific release, replace `@latest` with a tag from
+[Releases](https://github.com/otama-jaccy/sumiq/releases):
+
+```bash
+go install github.com/otama-jaccy/sumiq/cmd/sumiq@v0.1.0
+```
+
 Or clone and build it yourself:
 
 ```bash
