@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeQueries は /api/queries 系だけを受けるモック。prefix はパス付き endpoint の再現用。
@@ -291,5 +292,26 @@ func TestSave_RejectsMissingID(t *testing.T) {
 
 	if _, err := c.Save(context.Background(), q); err == nil {
 		t.Fatal("ID の無い応答を受け入れました")
+	}
+}
+
+// TestSave_MarkDraftTimeoutKeepsURL は draft への更新が打ち切られても、作成済みの
+// 保存クエリの URL がエラーに残ることを見る。締切は更新の段でしか切れない。
+func TestSave_MarkDraftTimeoutKeepsURL(t *testing.T) {
+	q := testSaveQuery()
+	f := &fakeQueries{
+		t:      t,
+		create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, false, false)),
+		update: func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() },
+	}
+	c := start(t, f, func(o *Options) { o.Timeout = 200 * time.Millisecond })
+
+	_, err := c.Save(context.Background(), q)
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) || timeoutErr.Phase != PhaseMarkDraft {
+		t.Fatalf("draft 更新の段のタイムアウトになっていません: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/queries/123") {
+		t.Errorf("作成済みの保存クエリの URL がエラーから落ちています: %v", err)
 	}
 }

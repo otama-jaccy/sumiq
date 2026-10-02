@@ -101,6 +101,8 @@ const (
 	PhaseListDataSources Phase = "list_data_sources"
 	// PhaseSaveQuery は保存クエリの検索・作成（Client.Save）。
 	PhaseSaveQuery Phase = "save_query"
+	// PhaseMarkDraft は作成済みの保存クエリを draft に更新する段（POST /api/queries/{id}）。
+	PhaseMarkDraft Phase = "mark_draft"
 )
 
 // TimeoutError は timeout 以内に処理が終わらなかったことを表す。
@@ -145,6 +147,9 @@ func (e *TimeoutError) Error() string {
 		return fmt.Sprintf("Redash が %s 以内に保存クエリの作成を終えませんでした。"+
 			"保存クエリが作られたかどうかは分かりません。Redash の画面で確認してください",
 			e.Timeout)
+	case PhaseMarkDraft:
+		return fmt.Sprintf("Redash が %s 以内に draft への更新を終えませんでした。"+
+			"保存クエリは公開状態のまま残っている可能性があります", e.Timeout)
 	default:
 		return fmt.Sprintf("Redash のクエリが %s 以内に終わりませんでした (ジョブ %s)。"+
 			"ジョブは Redash 側で実行され続けます。redash.timeout を延ばすか、クエリを軽くしてください",

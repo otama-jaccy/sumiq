@@ -96,12 +96,18 @@ func (c *Client) Save(ctx context.Context, q SaveQuery) (*SavedQuery, error) {
 	defer cancel()
 
 	saved, err := c.save(execCtx, q)
-	if err != nil {
+	if err == nil {
+		return saved, nil
+	}
+	if saved == nil {
 		return nil, c.classifyContextErr(ctx, execCtx, PhaseSaveQuery, "", err)
 	}
-	return saved, nil
+	// 作成は済んでいる。打ち切りでも URL を落とさず、作られたことを伝える。
+	err = c.classifyContextErr(ctx, execCtx, PhaseMarkDraft, "", err)
+	return nil, fmt.Errorf("保存クエリ %s を作成しましたが、draft にできませんでした: %w", saved.URL, err)
 }
 
+// save は作成まで済んで draft への更新だけが失敗したとき、作成したクエリとエラーの両方を返す。
 func (c *Client) save(ctx context.Context, q SaveQuery) (*SavedQuery, error) {
 	existing, err := c.findSavedQuery(ctx, q)
 	if err != nil {
@@ -127,7 +133,7 @@ func (c *Client) save(ctx context.Context, q SaveQuery) (*SavedQuery, error) {
 	// （https://discuss.redash.io/t/api-for-importing-queries-doesnt-respect-is-draft-and-seems-to-lack-update-ability/1808）。
 	// 現行の QueryListResource.post は is_draft を True に固定するが、古い版のために更新し直す。
 	if err := c.markDraft(ctx, created.ID); err != nil {
-		return nil, fmt.Errorf("保存クエリ %s を作成しましたが、draft にできませんでした: %w", saved.URL, err)
+		return saved, err
 	}
 	saved.IsDraft = true
 	return saved, nil
