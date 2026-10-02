@@ -85,11 +85,16 @@ func (f *fakeRedash) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handler は未設定のハンドラを踏んだときにテストを落とす。
 func (f *fakeRedash) handler(h http.HandlerFunc) http.HandlerFunc {
+	return handlerOr(f.t, h)
+}
+
+// handlerOr は h が nil なら、踏んだ時点でテストを落とすハンドラを返す。
+func handlerOr(t *testing.T, h http.HandlerFunc) http.HandlerFunc {
 	if h != nil {
 		return h
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		f.t.Errorf("応答を用意していないリクエスト: %s %s", r.Method, r.URL.Path)
+		t.Errorf("応答を用意していないリクエスト: %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }

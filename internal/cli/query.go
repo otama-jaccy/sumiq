@@ -16,6 +16,7 @@ type QueryCmd struct {
 	DataSource string `short:"d" name:"data-source" required:"" help:"実行対象のデータソース名（設定で定義した名前のみ）"`
 	Format     string `enum:"table,json,csv" default:"table" help:"出力形式 (table/json/csv)"`
 	Config     string `name:"config" type:"path" help:"設定ファイルを明示指定する"`
+	Save       bool   `name:"save" help:"SQL を Redash の draft の保存クエリにし、生の結果を画面で見られる URL を stderr に出す"`
 	SQL        string `arg:"" help:"実行する SQL"`
 }
 
@@ -26,5 +27,6 @@ func (c *QueryCmd) Run(ctx context.Context, deps *app.Deps) error {
 		Format:     output.Format(c.Format),
 		ConfigPath: c.Config,
 		SQL:        c.SQL,
+		Save:       c.Save,
 	})
 }

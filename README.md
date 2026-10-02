@@ -368,6 +368,42 @@ This is a limitation of the CSV format itself, and `sumiq` doesn't work
 around it. If you need to tell a `NULL` value apart from an empty string,
 use `json` output instead.
 
+## Viewing unmasked results in Redash (`--save`)
+
+`sumiq query --save` also registers the SQL as a saved query in Redash and
+prints its URL to stderr, after the masked result has been written:
+
+```
+Masked: email (partial), memo (redact)
+Dropped: --
+Exempted: --
+Rows: 342
+Saved: https://redash.example.com/queries/123 (draft)
+```
+
+The agent only ever sees the masked result and the URL. A human opens the URL
+and runs the query in Redash to see the raw values — who can see them is
+decided by Redash's own permissions (groups × data sources), not by `sumiq`.
+
+- Without `--save`, nothing is saved and no extra requests are sent.
+- The saved query is created as a **draft** tagged **`sumiq`**, named
+  `sumiq: <hash>` where the hash is derived from the data source ID and the
+  exact SQL text. Running the same SQL again reuses your existing saved query
+  (`(draft, 既存を再利用)`) instead of creating a new one. Whitespace is not
+  normalized, so reformatted SQL creates a new saved query.
+- The query result is still fetched ad-hoc. The saved query carries the same
+  `apply_auto_limit`, so Redash can attach the latest result of the same SQL to
+  it; if the page opens without a result, press **Execute** in Redash.
+- **You can't save to a data source your Redash user has view-only access
+  to.** Redash rejects it (403). The masked result is still printed, but
+  `sumiq` exits non-zero so the failure isn't mistaken for success.
+- Clean up by filtering the Redash query list on the `sumiq` tag and archiving
+  what you no longer need.
+
+This is a convenience, not a security boundary: an agent holding the API key
+can fetch the saved query's raw results from the Redash API directly (see
+[The data source allowlist is not a security boundary](#the-data-source-allowlist-is-not-a-security-boundary)).
+
 ## Documentation
 
 - [Configuration file reference](docs/configuration.md) — the full config file

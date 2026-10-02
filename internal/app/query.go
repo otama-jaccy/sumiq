@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strconv"
 
 	"github.com/otama-jaccy/sumiq/internal/config"
 	"github.com/otama-jaccy/sumiq/internal/mask"
@@ -22,7 +25,12 @@ type QueryParams struct {
 	ConfigPath string
 	// SQL は実行する SQL 本文。
 	SQL string
+	// Save は --save。true なら結果を出した後に SQL を Redash の保存クエリにする。
+	Save bool
 }
+
+// savedQueryTag は sumiq が作る保存クエリに付けるタグ。人間が一括で掃除するための目印。
+const savedQueryTag = "sumiq"
 
 // Query は設定を解決し、SQL を実行して、マスク済みの結果を出力する。
 //
@@ -88,10 +96,11 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		return err
 	}
 
+	autoLimit := rowguard.EffectiveAutoLimit(resolved.Config.Query, ds)
 	res, err := client.Execute(ctx, redash.Query{
 		SQL:          p.SQL,
 		DataSourceID: ds.ID,
-		AutoLimit:    rowguard.EffectiveAutoLimit(resolved.Config.Query, ds),
+		AutoLimit:    autoLimit,
 		// max_rows を fetch の取得段階にも渡す。rowguard.Check の判定は
 		// 取得済みの結果に対して行われるため、それだけでは auto_limit: false
 		// で巨大な結果を引いたときに判定へ辿り着く前の OOM を防げない
@@ -122,5 +131,33 @@ func Query(ctx context.Context, deps Deps, p QueryParams) error {
 		}
 	}
 
-	return output.Render(deps.Out, deps.Err, p.Format, masked, sum, deps.TTY)
+	if err := output.Render(deps.Out, deps.Err, p.Format, masked, sum, deps.TTY); err != nil {
+		return err
+	}
+	if !p.Save {
+		return nil
+	}
+
+	// 保存は結果を出した後に行う。保存に失敗してもマスク済みの結果は渡し、
+	// 失敗はエラーとして返して終了コードを非 0 にする。
+	saved, err := client.Save(ctx, redash.SaveQuery{
+		Name:         savedQueryName(ds.ID, p.SQL),
+		SQL:          p.SQL,
+		DataSourceID: ds.ID,
+		Tag:          savedQueryTag,
+		AutoLimit:    autoLimit,
+	})
+	if err != nil {
+		return fmt.Errorf("結果は出力しましたが、Redash に保存クエリを作れませんでした: %w", err)
+	}
+	return output.WriteSaved(deps.Err, saved)
+}
+
+// savedQueryName は保存クエリの名前を返す。名前が重複検出のキーを兼ねる。
+//
+// SQL の空白は正規化しない。正規化を誤って別の SQL を同一視するより、
+// 重複した保存クエリができる方が安全。
+func savedQueryName(dataSourceID int, sql string) string {
+	sum := sha256.Sum256([]byte(strconv.Itoa(dataSourceID) + "\n" + sql))
+	return "sumiq: " + hex.EncodeToString(sum[:])[:12]
 }

@@ -327,3 +327,49 @@ func TestMaskRepresentationPerFormat(t *testing.T) {
 		}
 	})
 }
+
+func TestWriteSaved(t *testing.T) {
+	const url = "https://redash.example.com/queries/123"
+	tests := []struct {
+		name  string
+		saved redash.SavedQuery
+		want  string
+	}{
+		{"新規", redash.SavedQuery{URL: url, IsDraft: true}, "Saved: " + url + " (draft)\n"},
+		{"再利用", redash.SavedQuery{URL: url, IsDraft: true, Reused: true}, "Saved: " + url + " (draft, 既存を再利用)\n"},
+		{"公開済みを再利用", redash.SavedQuery{URL: url, Reused: true}, "Saved: " + url + " (公開済み, 既存を再利用)\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var errW bytes.Buffer
+			if err := WriteSaved(&errW, &tt.saved); err != nil {
+				t.Fatalf("WriteSaved: %v", err)
+			}
+			if got := errW.String(); got != tt.want {
+				t.Errorf("WriteSaved() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRenderThenWriteSaved_URLOnlyOnStderr は Render と WriteSaved を続けて呼んだとき、
+// URL が stdout に混ざらずサマリの後ろに出ることを見る。
+func TestRenderThenWriteSaved_URLOnlyOnStderr(t *testing.T) {
+	const url = "https://redash.example.com/queries/123"
+	res := result([]string{"id"}, []any{"1"})
+	sum := mask.Summary{Columns: []mask.ColumnMask{{Name: "id", Method: config.MaskNone}}}
+
+	var out, errW bytes.Buffer
+	if err := Render(&out, &errW, JSON, res, sum, false); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if err := WriteSaved(&errW, &redash.SavedQuery{URL: url, IsDraft: true}); err != nil {
+		t.Fatalf("WriteSaved: %v", err)
+	}
+	if strings.Contains(out.String(), url) {
+		t.Errorf("stdout に URL が混ざっています: %s", out.String())
+	}
+	if !strings.HasSuffix(errW.String(), "Rows: 1\nSaved: "+url+" (draft)\n") {
+		t.Errorf("stderr のサマリの後ろに URL がありません: %q", errW.String())
+	}
+}
