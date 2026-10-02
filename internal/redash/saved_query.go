@@ -32,7 +32,6 @@ type SaveQuery struct {
 
 // SavedQuery は保存クエリの作成・再利用の結果。
 type SavedQuery struct {
-	ID int64
 	// URL は人間がブラウザで開く画面の URL（<endpoint>/queries/<id>）。
 	URL string
 	// IsDraft は応答の is_draft。再利用したクエリは人間が公開済みにしていることがある。
@@ -71,9 +70,10 @@ const (
 	// savedQueryPageSize は paginate が受け付ける page_size の上限。
 	savedQueryPageSize = 250
 	// maxSavedQueryPages は重複検出で読むページ数の上限。新しい順に読むため、
-	// 再利用すべきクエリは通常先頭に近い。上限まで見つからなければ作り直す
-	// （重複は増えるが、別の SQL を返す誤りにはならない）。
-	maxSavedQueryPages = 20
+	// 再利用すべきクエリは通常先頭に近い。新しい SQL は全ページを読んで外れるので、
+	// 上限は --save 1回あたりの往復数を抑える側で決める。上限まで見つからなければ
+	// 作り直す（重複は増えるが、別の SQL を返す誤りにはならない）。
+	maxSavedQueryPages = 4
 )
 
 // Save は q と同じ保存クエリが自分のものとして既にあればそれを返し、
@@ -126,11 +126,10 @@ func (c *Client) save(ctx context.Context, q SaveQuery) (*SavedQuery, error) {
 	// 作成時の is_draft を無視して公開状態で作る Redash がある
 	// （https://discuss.redash.io/t/api-for-importing-queries-doesnt-respect-is-draft-and-seems-to-lack-update-ability/1808）。
 	// 現行の QueryListResource.post は is_draft を True に固定するが、古い版のために更新し直す。
-	updated, err := c.markDraft(ctx, created.ID)
-	if err != nil {
+	if err := c.markDraft(ctx, created.ID); err != nil {
 		return nil, fmt.Errorf("保存クエリ %s を作成しましたが、draft にできませんでした: %w", saved.URL, err)
 	}
-	saved.IsDraft = updated.IsDraft
+	saved.IsDraft = true
 	return saved, nil
 }
 
@@ -152,6 +151,8 @@ func (c *Client) findSavedQuery(ctx context.Context, q SaveQuery) (*savedQuery, 
 		}
 		for i := range p.Results {
 			r := &p.Results[i]
+			// タグはサーバ側でも絞っているが、tags を無視する Redash から
+			// 人間の同名クエリを拾わないよう手元でも確かめる。
 			if r.Name == q.Name && r.Query == q.SQL && r.DataSourceID == q.DataSourceID &&
 				r.Options.ApplyAutoLimit == q.AutoLimit && slices.Contains(r.Tags, q.Tag) {
 				return r, nil
@@ -194,16 +195,16 @@ func (c *Client) createSavedQuery(ctx context.Context, q SaveQuery) (*savedQuery
 }
 
 // markDraft は POST /api/queries/{id} で is_draft を true にする。
-func (c *Client) markDraft(ctx context.Context, id int64) (*savedQuery, error) {
+func (c *Client) markDraft(ctx context.Context, id int64) error {
 	var updated savedQuery
 	if err := c.do(ctx, http.MethodPost, c.resolve("api", "queries", strconv.FormatInt(id, 10)),
 		[]byte(`{"is_draft":true}`), &updated); err != nil {
-		return nil, err
+		return err
 	}
 	if !updated.IsDraft {
-		return nil, errors.New("Redash は is_draft: false のまま応答しました")
+		return errors.New("Redash は is_draft: false のまま応答しました")
 	}
-	return &updated, nil
+	return nil
 }
 
 // toSavedQuery は応答を SavedQuery にする。ID は数値として検証してから URL に使う。
@@ -212,7 +213,6 @@ func (c *Client) toSavedQuery(q *savedQuery, reused bool) (*SavedQuery, error) {
 		return nil, fmt.Errorf("Redash の応答に保存クエリの ID がありません: %d", q.ID)
 	}
 	return &SavedQuery{
-		ID:      q.ID,
 		URL:     c.resolve("queries", strconv.FormatInt(q.ID, 10)),
 		IsDraft: q.IsDraft,
 		Reused:  reused,

@@ -20,6 +20,14 @@ const testAPIKey = "test-api-key-0123456789"
 // query_result_id を先取りで返すため、ジョブのポーリングは発生しない。
 func fakeRedash(t *testing.T, columns, rows string) *httptest.Server {
 	t.Helper()
+	srv := httptest.NewServer(fakeRedashMux(columns, rows))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// fakeRedashMux は fakeRedash の ad-hoc 実行の経路だけを持つ mux。
+// 保存クエリなど別の経路を足したいテストが使う。
+func fakeRedashMux(columns, rows string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/query_results", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -29,9 +37,7 @@ func fakeRedash(t *testing.T, columns, rows string) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"query_result":{"id":1,"data":{"columns":[%s],"rows":[%s]}}}`, columns, rows)
 	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
+	return mux
 }
 
 func col(name, typ string) string {

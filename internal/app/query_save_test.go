@@ -18,7 +18,7 @@ import (
 
 // saveFake は ad-hoc 実行と保存クエリの API を受けるモック。
 type saveFake struct {
-	// jobBody は POST /api/query_results の応答。空なら即完了を返す。
+	// jobBody は POST /api/query_results の応答。空なら fakeRedashMux の即完了を使う。
 	jobBody string
 	// existing は GET /api/queries/my が返すクエリ1件。空なら一覧も空。
 	existing string
@@ -32,18 +32,13 @@ type saveFake struct {
 
 func (f *saveFake) start(t *testing.T) *httptest.Server {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/query_results", func(w http.ResponseWriter, r *http.Request) {
-		body := f.jobBody
-		if body == "" {
-			body = `{"job":{"id":"job-1","status":3,"error":"","query_result_id":1}}`
-		}
-		fmt.Fprint(w, body)
-	})
-	mux.HandleFunc("/api/query_results/1", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"query_result":{"id":1,"data":{"columns":[%s],"rows":[{"id":1,"email":"a@example.com"}]}}}`,
-			col("id", "integer")+","+col("email", "string"))
-	})
+	mux := fakeRedashMux(col("id", "integer")+","+col("email", "string"), `{"id":1,"email":"a@example.com"}`)
+	if f.jobBody != "" {
+		mux = http.NewServeMux()
+		mux.HandleFunc("/api/query_results", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, f.jobBody)
+		})
+	}
 	mux.HandleFunc("/api/queries/", func(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
 		if r.URL.Path != "/api/queries/my" {

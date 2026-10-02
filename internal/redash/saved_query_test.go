@@ -56,25 +56,15 @@ func (f *fakeQueries) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.createBody = body
 		f.mu.Unlock()
-		f.handlerOr(f.create)(w, r)
+		handlerOr(f.t, f.create)(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/queries/"):
 		f.mu.Lock()
 		f.updateBody = body
 		f.mu.Unlock()
-		f.handlerOr(f.update)(w, r)
+		handlerOr(f.t, f.update)(w, r)
 	default:
 		f.t.Errorf("想定していないリクエスト: %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusNotFound)
-	}
-}
-
-func (f *fakeQueries) handlerOr(h http.HandlerFunc) http.HandlerFunc {
-	if h != nil {
-		return h
-	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		f.t.Errorf("応答を用意していないリクエスト: %s %s", r.Method, r.URL.Path)
-		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
@@ -89,11 +79,7 @@ func testSaveQuery() SaveQuery {
 }
 
 // queryJSON は serialize_query と同じ形のクエリ1件を組み立てる。
-func queryJSON(id int64, name, sql string, dsID int, isDraft bool) string {
-	return queryJSONWithAutoLimit(id, name, sql, dsID, isDraft, false)
-}
-
-func queryJSONWithAutoLimit(id int64, name, sql string, dsID int, isDraft, autoLimit bool) string {
+func queryJSON(id int64, name, sql string, dsID int, isDraft, autoLimit bool) string {
 	b, _ := json.Marshal(map[string]any{
 		"id": id, "name": name, "query": sql, "data_source_id": dsID,
 		"is_draft": isDraft, "tags": []string{"sumiq"}, "version": 1,
@@ -109,7 +95,7 @@ func pageJSON(count int, items ...string) string {
 func TestSave_CreatesDraftWithTag(t *testing.T) {
 	q := testSaveQuery()
 	q.AutoLimit = true
-	f := &fakeQueries{t: t, create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, true))}
+	f := &fakeQueries{t: t, create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, true, false))}
 	c := start(t, f, nil)
 
 	got, err := c.Save(context.Background(), q)
@@ -131,7 +117,7 @@ func TestSave_CreatesDraftWithTag(t *testing.T) {
 			t.Errorf("作成リクエストの %s = %v, want %v", k, body[k], v)
 		}
 	}
-	if got.ID != 123 || !got.IsDraft || got.Reused {
+	if !got.IsDraft || got.Reused {
 		t.Errorf("Save() = %+v", got)
 	}
 	if !strings.HasSuffix(got.URL, "/queries/123") {
@@ -147,7 +133,7 @@ func TestSave_CreatesDraftWithTag(t *testing.T) {
 
 func TestSave_ListRequestFiltersByTag(t *testing.T) {
 	q := testSaveQuery()
-	f := &fakeQueries{t: t, create: respond(http.StatusOK, queryJSON(1, q.Name, q.SQL, 3, true))}
+	f := &fakeQueries{t: t, create: respond(http.StatusOK, queryJSON(1, q.Name, q.SQL, 3, true, false))}
 	c := start(t, f, nil)
 
 	if _, err := c.Save(context.Background(), q); err != nil {
@@ -168,8 +154,8 @@ func TestSave_MarksDraftWhenCreateIgnoresIt(t *testing.T) {
 	q := testSaveQuery()
 	f := &fakeQueries{
 		t:      t,
-		create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, false)),
-		update: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, true)),
+		create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, false, false)),
+		update: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, true, false)),
 	}
 	c := start(t, f, nil)
 
@@ -193,8 +179,8 @@ func TestSave_MarkDraftStillFalseIsError(t *testing.T) {
 	q := testSaveQuery()
 	f := &fakeQueries{
 		t:      t,
-		create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, false)),
-		update: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, false)),
+		create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, false, false)),
+		update: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, false, false)),
 	}
 	c := start(t, f, nil)
 
@@ -212,11 +198,11 @@ func TestSave_ReusesExisting(t *testing.T) {
 	f := &fakeQueries{t: t, list: map[string]string{
 		"1": pageJSON(4,
 			// 名前は同じだが人間が SQL を書き換えたもの、別データソースのものは再利用しない。
-			queryJSON(10, q.Name, "SELECT 1", 3, true),
-			queryJSON(11, q.Name, q.SQL, 4, true),
+			queryJSON(10, q.Name, "SELECT 1", 3, true, false),
+			queryJSON(11, q.Name, q.SQL, 4, true, false),
 			// apply_auto_limit が違うと、画面で Execute したときに別の LIMIT で走る。
-			queryJSONWithAutoLimit(13, q.Name, q.SQL, 3, true, true),
-			queryJSON(12, q.Name, q.SQL, 3, false),
+			queryJSON(13, q.Name, q.SQL, 3, true, true),
+			queryJSON(12, q.Name, q.SQL, 3, false, false),
 		),
 	}}
 	c := start(t, f, nil)
@@ -225,7 +211,7 @@ func TestSave_ReusesExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if got.ID != 12 || !got.Reused || got.IsDraft {
+	if !strings.HasSuffix(got.URL, "/queries/12") || !got.Reused || got.IsDraft {
 		t.Errorf("Save() = %+v, want ID 12 を再利用（公開済み）", got)
 	}
 	for _, p := range f.paths() {
@@ -237,14 +223,14 @@ func TestSave_ReusesExisting(t *testing.T) {
 
 func TestSave_PagesUntilCount(t *testing.T) {
 	q := testSaveQuery()
-	other := queryJSON(1, "sumiq: ffffffffffff", "SELECT 2", 3, true)
+	other := queryJSON(1, "sumiq: ffffffffffff", "SELECT 2", 3, true, false)
 	first := make([]string, savedQueryPageSize)
 	for i := range first {
 		first[i] = other
 	}
 	f := &fakeQueries{t: t, list: map[string]string{
 		"1": pageJSON(savedQueryPageSize+1, first...),
-		"2": pageJSON(savedQueryPageSize+1, queryJSON(77, q.Name, q.SQL, 3, true)),
+		"2": pageJSON(savedQueryPageSize+1, queryJSON(77, q.Name, q.SQL, 3, true, false)),
 	}}
 	c := start(t, f, nil)
 
@@ -252,7 +238,7 @@ func TestSave_PagesUntilCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if got.ID != 77 || !got.Reused {
+	if !strings.HasSuffix(got.URL, "/queries/77") || !got.Reused {
 		t.Errorf("2ページ目の既存クエリを再利用していません: %+v", got)
 	}
 	if len(f.listQuery) != 2 {
@@ -262,8 +248,8 @@ func TestSave_PagesUntilCount(t *testing.T) {
 
 func TestSave_EndpointWithPath(t *testing.T) {
 	q := testSaveQuery()
-	f := &fakeQueries{t: t, prefix: "/redash", create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, true))}
-	c := startWithPath(t, f, "/redash/")
+	f := &fakeQueries{t: t, prefix: "/redash", create: respond(http.StatusOK, queryJSON(123, q.Name, q.SQL, 3, true, false))}
+	c := start(t, f, func(o *Options) { o.Endpoint += "/redash/" })
 
 	got, err := c.Save(context.Background(), q)
 	if err != nil {
@@ -306,10 +292,4 @@ func TestSave_RejectsMissingID(t *testing.T) {
 	if _, err := c.Save(context.Background(), q); err == nil {
 		t.Fatal("ID の無い応答を受け入れました")
 	}
-}
-
-// startWithPath は endpoint にパスを付けた Client を返す。
-func startWithPath(t *testing.T, h http.Handler, path string) *Client {
-	t.Helper()
-	return start(t, h, func(o *Options) { o.Endpoint += path })
 }

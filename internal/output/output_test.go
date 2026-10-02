@@ -335,9 +335,9 @@ func TestWriteSaved(t *testing.T) {
 		saved redash.SavedQuery
 		want  string
 	}{
-		{"新規", redash.SavedQuery{ID: 123, URL: url, IsDraft: true}, "Saved: " + url + " (draft)\n"},
-		{"再利用", redash.SavedQuery{ID: 123, URL: url, IsDraft: true, Reused: true}, "Saved: " + url + " (draft, 既存を再利用)\n"},
-		{"公開済みを再利用", redash.SavedQuery{ID: 123, URL: url, Reused: true}, "Saved: " + url + " (公開済み, 既存を再利用)\n"},
+		{"新規", redash.SavedQuery{URL: url, IsDraft: true}, "Saved: " + url + " (draft)\n"},
+		{"再利用", redash.SavedQuery{URL: url, IsDraft: true, Reused: true}, "Saved: " + url + " (draft, 既存を再利用)\n"},
+		{"公開済みを再利用", redash.SavedQuery{URL: url, Reused: true}, "Saved: " + url + " (公開済み, 既存を再利用)\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -363,7 +363,7 @@ func TestRenderThenWriteSaved_URLOnlyOnStderr(t *testing.T) {
 	if err := Render(&out, &errW, JSON, res, sum, false); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if err := WriteSaved(&errW, &redash.SavedQuery{ID: 123, URL: url, IsDraft: true}); err != nil {
+	if err := WriteSaved(&errW, &redash.SavedQuery{URL: url, IsDraft: true}); err != nil {
 		t.Fatalf("WriteSaved: %v", err)
 	}
 	if strings.Contains(out.String(), url) {
