@@ -6,6 +6,8 @@
 //  2. GET  /api/jobs/{job_id}        完了するまでポーリングする
 //  3. GET  /api/query_results/{id}   結果を取得する
 //
+// 加えて、人間が生の結果を画面で見るための保存クエリを作れる（Client.Save）。
+//
 // このパッケージは internal/config を import しない。設定の解決結果から
 // 必要な値だけを Options に詰め替えて渡す。設定のレイヤ構造は Redash の
 // 都合とは無関係であり、ここに持ち込むと API クライアントを設定ファイル

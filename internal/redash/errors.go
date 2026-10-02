@@ -99,6 +99,8 @@ const (
 	// PhaseListDataSources は GET /api/data_sources（ListDataSources）。
 	// submit/wait/fetch の3段構えとは別の、ジョブを介さない単発 GET。
 	PhaseListDataSources Phase = "list_data_sources"
+	// PhaseSaveQuery は保存クエリの検索・作成（Client.Save）。
+	PhaseSaveQuery Phase = "save_query"
 )
 
 // TimeoutError は timeout 以内に処理が終わらなかったことを表す。
@@ -138,6 +140,11 @@ func (e *TimeoutError) Error() string {
 		// ジョブを介さない単発 GET なので、ジョブ ID もクエリを軽くする助言も無い。
 		return fmt.Sprintf("Redash が %s 以内にデータソース一覧を返しませんでした。"+
 			"redash.timeout を延ばすか、接続を確認してください", e.Timeout)
+	case PhaseSaveQuery:
+		// クエリの実行は終わっている。保存クエリが作られたかどうかは分からない。
+		return fmt.Sprintf("Redash が %s 以内に保存クエリの作成を終えませんでした。"+
+			"保存クエリが作られたかどうかは分かりません。Redash の画面で確認してください",
+			e.Timeout)
 	default:
 		return fmt.Sprintf("Redash のクエリが %s 以内に終わりませんでした (ジョブ %s)。"+
 			"ジョブは Redash 側で実行され続けます。redash.timeout を延ばすか、クエリを軽くしてください",
