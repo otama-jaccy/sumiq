@@ -374,6 +374,12 @@ func (c *Client) ListDataSources(ctx context.Context) ([]DataSource, error) {
 3段構え（submit/wait/fetch）以外の単発 GET を足す場合も、専用の `Phase` を
 `errors.go` に追加し、`TimeoutError.Error()` にその段に合った文言を足すこと。
 
+`classifyContextErr` は締切超過・キャンセルのエラーを**丸ごと置き換える。** 先に
+`fmt.Errorf("... %s ...: %w", url, err)` で文脈を足してから通すと、足した文脈ごと
+`TimeoutError` に差し替わって消える。作成 → 更新のように前段の成果（作成済みクエリの
+URL 等）を伝えたい複数段の処理では、**分類してから**文脈を足す（`Client.Save` の
+`PhaseMarkDraft`。#47 の `/code-review` で検出）。
+
 ### 既存スライスを切り詰めて返すなら、3つ目のインデックスで cap を切る
 
 `s[:n]` は capacity を元のスライスから引き継ぐ。戻り値に別の要素を append すると、
@@ -477,6 +483,8 @@ t.Cleanup(func() { close(ch) })   // 後に登録 = 先に走る
   `Render` を経由しない独立した formatter を持つ（上の「単発 GET の `classifyContextErr`」の背景）
 - [ADR-0016](../../docs/adr/0016-sql-alias-mask-propagation.md): 別名（AS）で改名された列に
   マスクを伝播する（上の「列名の由来（別名）を辿る検査」の背景）
+- [ADR-0017](../../docs/adr/0017-save-query-for-human-review.md): `--save` で draft の保存クエリを作り、
+  人間が生の結果を Redash の画面で見られるようにする
 
 設計判断を変える場合は既存 ADR を書き換えず、ステータスを `Superseded by ADR-XXXX` にして新しい ADR を立てる。
 
